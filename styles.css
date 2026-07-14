@@ -250,7 +250,14 @@ main { padding: 4px 18px 28px; }
   padding: 8px 0 10px; margin-bottom: 8px;
   display: flex; justify-content: space-between; align-items: center;
 }
-.sheet-title .close { font-family: var(--sans); font-size: 13px; color: var(--muted); font-weight: 400; padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); }
+.sheet-title-actions { display: flex; gap: 8px; }
+.icon-mini {
+  width: 32px; height: 32px; border-radius: 10px; flex: 0 0 auto;
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  display: grid; place-items: center;
+}
+.icon-mini svg { width: 15px; height: 15px; }
+.icon-mini.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
 .sheet-actions {
   position: sticky; bottom: 0; z-index: 3; background: var(--bg);
   border-top: 1px solid var(--line);

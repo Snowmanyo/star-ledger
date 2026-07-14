@@ -34,6 +34,17 @@ const OWN_LABEL = { self: '自留', proxy: '代購', stock: '現貨', pending: '
 const PAY_LABEL = { cash: '現金', credit_card: '信用卡', bank_transfer: '轉帳', mobile_payment: '行動支付', '': '—' };
 const CAT_LABEL = { ticket: '票券', transport: '交通', lodging: '住宿', food: '餐飲', merch: '周邊', other: '其他' };
 const TAB_TITLE = { orders: '訂單', sales: '販售', events: '活動', ledger: '總帳', settings: '設定' };
+const ICONS = {
+  copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 7V5h4v2M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+};
+function sheetTitleHtml(title, withDelete, delId) {
+  return `<div class="sheet-title">${title}<span class="sheet-title-actions">
+    ${withDelete ? `<button class="icon-mini danger" id="${delId}" aria-label="刪除">${ICONS.trash}</button>` : ''}
+    <button class="icon-mini" id="sh-close" aria-label="關閉">${ICONS.close}</button>
+  </span></div>`;
+}
 
 const NUMF = {
   orders: ['domesticShipping', 'internationalShippingTwd', 'internationalShippingRateTwdPerKg', 'discountAmount', 'weightGrams', 'exchangeRate', 'chargedTwd'],
@@ -315,18 +326,50 @@ function saveSale(sale) {
   }
   pushOps(ops);
 }
+function renumberEvents() {
+  const numbered = DB.events.filter(e => num(e.eventNumber) && e.startDate);
+  // 沒日期的場次：用原編號在已編號場次中的相對位置推出等效日期，維持原本的前後順序
+  const effKey = e => {
+    if (e.startDate) return String(e.startDate);
+    const n = num(e.eventNumber);
+    if (!n) return '9999';
+    let best = '';
+    numbered.forEach(x => { if (num(x.eventNumber) <= n && String(x.startDate) > best) best = String(x.startDate); });
+    return best || '0000';
+  };
+  const sorted = DB.events.slice().sort((a, b) =>
+    effKey(a).localeCompare(effKey(b)) || (num(a.eventNumber) - num(b.eventNumber)) ||
+    String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  const changed = [];
+  sorted.forEach((e, i) => {
+    const n = String(i + 1);
+    if (String(e.eventNumber) !== n) { e.eventNumber = n; changed.push(e); }
+  });
+  return changed;
+}
 function saveEvent(ev) {
   const i = DB.events.findIndex(e => e.id === ev.id);
   if (i >= 0) DB.events[i] = ev; else DB.events.unshift(ev);
+  const changed = renumberEvents();
+  if (!changed.some(e => e.id === ev.id)) changed.push(ev);
   saveDB();
-  pushOps([{ action: 'upsert', table: 'events', rows: [ev] }]);
+  pushOps([{ action: 'upsert', table: 'events', rows: changed }]);
+}
+function copyEvent(src) {
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.id = uid();
+  copy.createdAt = today();
+  saveEvent(copy);
+  return copy;
 }
 function deleteEvent(ev) {
   DB.events = DB.events.filter(e => e.id !== ev.id);
   const orphans = DB.ledger.filter(l => l.eventId === ev.id);
   orphans.forEach(l => { l.eventId = ''; });
+  const changed = renumberEvents();
   saveDB();
   const ops = [{ action: 'delete', table: 'events', ids: [ev.id] }];
+  if (changed.length) ops.push({ action: 'upsert', table: 'events', rows: changed });
   if (orphans.length) ops.push({ action: 'upsert', table: 'ledger', rows: orphans });
   pushOps(ops);
 }
@@ -475,7 +518,7 @@ function ordersListHtml() {
       </div>
       <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
         <div style="min-width:0">${badges}</div>
-        <button class="btn line small" style="padding:3px 12px;font-size:12px;flex:0 0 auto" data-copy-order="${esc(o.id)}">複製</button>
+        <button class="icon-mini" data-copy-order="${esc(o.id)}" aria-label="複製訂單">${ICONS.copy}</button>
       </div>
     </div>`;
   }).join('');
@@ -699,6 +742,14 @@ function renderEvents(view) {
     const ev = DB.events.find(x => x.id === el.dataset.event);
     if (ev) openEventForm(ev);
   });
+  $$('[data-copy-event]', view).forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    const src = DB.events.find(x => x.id === b.dataset.copyEvent);
+    if (!src) return;
+    copyEvent(src);
+    render();
+    toast('已複製整場活動，可點進去修改');
+  });
 }
 function eventListHtml() {
   const q = state.evSearch.trim().toLowerCase();
@@ -732,10 +783,13 @@ function eventListHtml() {
       ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
       ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
     </div>
-    <div style="margin-top:6px">
-      ${e.eventType ? `<span class="badge accent">${esc(e.eventType)}</span>` : ''}
-      ${e.liveTour ? `<span class="badge">${esc(e.liveTour)}</span>` : ''}
-      ${e.settled ? '<span class="badge ok">已結清</span>' : '<span class="badge danger">未結清</span>'}
+    <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <div style="min-width:0">
+        ${e.eventType ? `<span class="badge accent">${esc(e.eventType)}</span>` : ''}
+        ${e.liveTour ? `<span class="badge">${esc(e.liveTour)}</span>` : ''}
+        ${e.settled ? '<span class="badge ok">已結清</span>' : '<span class="badge danger">未結清</span>'}
+      </div>
+      <button class="icon-mini" data-copy-event="${esc(e.id)}" aria-label="複製活動">${ICONS.copy}</button>
     </div>
   </div>`).join('');
   return html;
@@ -1068,9 +1122,9 @@ function openOrderForm(existing) {
     const ownOpts = Object.entries(OWN_LABEL).map(([v, l]) => [v, l]);
     return `<div class="item-block" data-item="${i}">
       <div class="item-block-head"><span class="no">品項 ${i + 1}</span>
-        <span>
-          <button class="btn line small" data-copy-item="${i}">複製</button>
-          <button class="btn danger small" data-del-item="${i}">移除</button>
+        <span style="display:flex;gap:8px">
+          <button class="icon-mini" data-copy-item="${i}" aria-label="複製品項">${ICONS.copy}</button>
+          <button class="icon-mini danger" data-del-item="${i}" aria-label="移除品項">${ICONS.trash}</button>
         </span></div>
       <div class="field"><label>品名</label><input data-k="name" data-i="${i}" value="${esc(it.name)}"></div>
       <div class="field-row">
@@ -1095,7 +1149,7 @@ function openOrderForm(existing) {
   const payOpts = [['', '—'], ['cash', '現金'], ['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付']];
   const curOpts = CURRENCIES.map(c => [c, c]);
   const html = `
-  <div class="sheet-title">${isNew ? '新增訂單' : '編輯訂單'}<button class="close" id="sh-close">關閉</button></div>
+  ${sheetTitleHtml(isNew ? '新增訂單' : '編輯訂單', !isNew, 'order-del')}
   <datalist id="dl-channel">${datalistOptions(DB.orders.map(x => x.channel))}</datalist>
   <datalist id="dl-payer">${datalistOptions(DB.orders.map(x => x.payer).concat(DB.ledger.map(x => x.payer)))}</datalist>
   <datalist id="dl-proxy">${datalistOptions(DB.orders.flatMap(x => (x.items || []).map(it => it.proxyFor)))}</datalist>
@@ -1144,10 +1198,6 @@ function openOrderForm(existing) {
 
   <div class="sheet-actions">
     <button class="btn primary" id="order-save">儲存訂單</button>
-    ${isNew ? '' : `<div class="btn-row">
-      <button class="btn line" id="order-copy">複製整筆</button>
-      <button class="btn danger" id="order-del">刪除訂單</button>
-    </div>`}
   </div>`;
 
   const sheet = openSheet(html);
@@ -1246,15 +1296,6 @@ function openOrderForm(existing) {
     toast('訂單已儲存');
   };
   if (!isNew) {
-    $('#order-copy').onclick = () => {
-      readOrder();
-      const copy = copyOrder(o);
-      saveOrder(copy, []);
-      closeSheet();
-      render();
-      toast('已複製整筆訂單');
-      openOrderForm(copy);
-    };
     $('#order-del').onclick = () => {
       if (!confirm('刪除這筆訂單與所有品項？相關現貨販售紀錄也會移除。')) return;
       deleteOrder(o);
@@ -1268,10 +1309,9 @@ function openOrderForm(existing) {
 /* ---------- 活動表單 ---------- */
 function openEventForm(existing) {
   const isNew = !existing;
-  const maxNo = DB.events.reduce((m, e) => Math.max(m, num(e.eventNumber)), 0);
   const ev = existing ? JSON.parse(JSON.stringify(existing)) : {
     id: uid(), name: '', artist: '', city: '', venue: '', startDate: today(), endDate: '',
-    eventNumber: String(maxNo + 1), originalDate: '', eventType: '', liveTour: '', seriesEvent: '',
+    eventNumber: '', originalDate: '', eventType: '', liveTour: '', seriesEvent: '',
     seat: '', ticketPriceTwd: '', guest: '', payer: '', settled: false, notes: '', createdAt: today(),
   };
   const related = DB.ledger.filter(l => l.eventId === ev.id);
@@ -1285,16 +1325,14 @@ function openEventForm(existing) {
     </div>`).join('') : '<div class="section-note">尚無相關流水</div>';
 
   const html = `
-  <div class="sheet-title">${isNew ? '新增活動' : '編輯活動'}<button class="close" id="sh-close">關閉</button></div>
+  ${sheetTitleHtml(isNew ? '新增活動' : '編輯活動 #' + esc(ev.eventNumber || '–'), !isNew, 'event-del')}
   <datalist id="dl-artist">${datalistOptions(DB.events.map(x => x.artist))}</datalist>
   <datalist id="dl-type">${datalistOptions(DB.events.map(x => x.eventType).concat(['專場', '演唱會', '簽售', '見面會', '快閃店']))}</datalist>
   <datalist id="dl-payer2">${datalistOptions(DB.events.map(x => x.payer).concat(DB.ledger.map(x => x.payer)))}</datalist>
   ${fieldHtml('活動名稱', `<input id="e-name" value="${esc(ev.name)}">`)}
-  <div class="field-row">
-    ${fieldHtml('表演者', `<input id="e-artist" list="dl-artist" value="${esc(ev.artist)}">`)}
-    ${fieldHtml('場次編號', `<input id="e-eventNumber" type="number" inputmode="numeric" value="${esc(ev.eventNumber)}">`)}
-  </div>
+  ${fieldHtml('表演者', `<input id="e-artist" list="dl-artist" value="${esc(ev.artist)}">`)}
   ${fieldHtml('活動日期', `<input id="e-startDate" type="date" value="${esc(ev.startDate)}">`)}
+  <div class="hint">場次編號會依活動日期自動編排</div>
   <div class="field-row">
     ${fieldHtml('城市', `<input id="e-city" value="${esc(ev.city)}">`)}
     ${fieldHtml('場地', `<input id="e-venue" value="${esc(ev.venue)}">`)}
@@ -1326,44 +1364,25 @@ function openEventForm(existing) {
   ${relatedHtml}`}
   <div class="sheet-actions">
     <button class="btn primary" id="event-save">儲存活動</button>
-    ${isNew ? '' : `<div class="btn-row">
-      <button class="btn line" id="event-copy">複製整場</button>
-      <button class="btn danger" id="event-del">刪除活動</button>
-    </div>`}
   </div>`;
 
   openSheet(html);
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'eventNumber', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
+    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     const p = $('#e-ticketPriceTwd').value;
     ev.ticketPriceTwd = p === '' ? '' : num(p);
     ev.settled = $('#e-settled').checked;
   }
   $('#event-save').onclick = () => {
     readEvent();
-    if (!String(ev.eventNumber).trim()) {
-      ev.eventNumber = String(DB.events.reduce((m, e) => Math.max(m, num(e.eventNumber)), 0) + 1);
-    }
     saveEvent(ev);
     closeSheet();
     render();
     toast('活動已儲存');
   };
   if (!isNew) {
-    $('#event-copy').onclick = () => {
-      readEvent();
-      const copy = JSON.parse(JSON.stringify(ev));
-      copy.id = uid();
-      copy.eventNumber = String(DB.events.reduce((m, e) => Math.max(m, num(e.eventNumber)), 0) + 1);
-      copy.createdAt = today();
-      saveEvent(copy);
-      closeSheet();
-      render();
-      toast('已複製整場活動');
-      openEventForm(copy);
-    };
     $('#event-del').onclick = () => {
       if (!confirm('刪除這場活動？相關總帳流水會保留但解除連結。')) return;
       deleteEvent(ev);
@@ -1405,7 +1424,7 @@ function openLedgerForm(existing, preset) {
   const curOpts = [['', '—']].concat(CURRENCIES.map(c => [c, c]));
 
   const html = `
-  <div class="sheet-title">${isNew ? '新增流水' : '編輯流水'}<button class="close" id="sh-close">關閉</button></div>
+  ${sheetTitleHtml(isNew ? '新增流水' : '編輯流水', !isNew, 'ledger-del')}
   <div class="seg" id="l-type">
     <button data-type="expense" class="${l.type !== 'income' ? 'on' : ''}">支出</button>
     <button data-type="income" class="${l.type === 'income' ? 'on' : ''}">收入</button>
@@ -1454,7 +1473,6 @@ function openLedgerForm(existing, preset) {
   ${fieldHtml('備註', `<textarea id="l-notes" rows="2">${esc(l.notes)}</textarea>`)}
   <div class="sheet-actions">
     <button class="btn primary" id="ledger-save">儲存流水</button>
-    ${isNew ? '' : '<button class="btn danger" id="ledger-del">刪除流水</button>'}
   </div>`;
 
   openSheet(html);

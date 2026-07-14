@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F6F1E9">
+<title>追星總帳</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✦</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <div class="topbar-eyebrow">STAR LEDGER</div>
+    <h1 class="topbar-title" id="page-title">訂單</h1>
+  </div>
+  <div class="topbar-actions">
+    <button class="icon-btn" id="sync-btn" aria-label="同步">
+      <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13.6-5.7M20 12a8 8 0 0 1-13.6 5.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M17.5 2.5v4h-4M6.5 21.5v-4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<button class="fab" id="fab" aria-label="新增">
+  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+</button>
+
+<nav class="tabbar" id="tabbar">
+  <button data-tab="orders">
+    <svg viewBox="0 0 24 24"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z M4 7.5 12 12l8-4.5 M12 12v9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    <span>訂單</span>
+  </button>
+  <button data-tab="sales">
+    <svg viewBox="0 0 24 24"><path d="M3 11V4h7l10 10-7 7L3 11Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="8" cy="9" r="1.4" fill="currentColor"/></svg>
+    <span>販售</span>
+  </button>
+  <button data-tab="events">
+    <svg viewBox="0 0 24 24"><path d="M12 3.5 14.6 9l5.9.6-4.4 4 1.3 5.9-5.4-3.1-5.4 3.1 1.3-5.9-4.4-4L9.4 9 12 3.5Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    <span>活動</span>
+  </button>
+  <button data-tab="ledger">
+    <svg viewBox="0 0 24 24"><path d="M5 4h13a1 1 0 0 1 1 1v15H6a2 2 0 0 1-2-2V5a1 1 0 0 1 1-1Z M19 16H6a2 2 0 0 0-2 2 M8 8h7M8 11.5h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>總帳</span>
+  </button>
+  <button data-tab="settings">
+    <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h4M12 12h8M4 17h13M20 17h0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="18.5" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span>設定</span>
+  </button>
+</nav>
+
+<div class="sheet-backdrop" id="sheet-backdrop"></div>
+<div class="sheet" id="sheet"></div>
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

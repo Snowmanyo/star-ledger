@@ -139,6 +139,11 @@ main { padding: 4px 16px 24px; }
 }
 .chip.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
+.filter-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.filter-row.two { grid-template-columns: 1fr 1fr; }
+.filter-row select { padding: 7px 8px; font-size: 13px; border-radius: 10px; color: var(--muted); }
+.filter-row select.active { color: var(--ink); border-color: var(--accent); }
+
 .searchbar { position: relative; margin: 6px 0 12px; }
 .searchbar input { padding-left: 36px; border-radius: 12px; }
 .searchbar svg {
@@ -276,6 +281,25 @@ main { padding: 4px 16px 24px; }
 }
 .swatch.on .dot { border-color: var(--ink); }
 .swatch.on { color: var(--ink); font-weight: 500; }
+
+/* ---------- 統計圖表 ---------- */
+.chart-title {
+  font-family: var(--serif); font-size: 14px; font-weight: 600; letter-spacing: .08em;
+  margin-bottom: 4px; display: flex; justify-content: space-between; align-items: baseline;
+}
+.chart-title .mini { font-family: var(--sans); font-size: 11px; color: var(--muted); font-weight: 400; }
+.cols { display: flex; align-items: flex-end; gap: 3px; height: 96px; margin-top: 10px; }
+.cols .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; height: 100%; }
+.cols .col em { font-style: normal; font-size: 9px; color: var(--muted); text-align: center; line-height: 1.4; }
+.cols .col i { display: block; background: var(--accent); border-radius: 3px 3px 0 0; opacity: .85; }
+.cols-labels { display: flex; gap: 3px; margin-top: 4px; }
+.cols-labels span { flex: 1; font-size: 9px; color: var(--muted); text-align: center; white-space: nowrap; }
+.bar-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12.5px; }
+.bar-row .bl { flex: 0 0 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row .track { flex: 1; height: 8px; background: var(--soft); border-radius: 4px; overflow: hidden; }
+.bar-row .track i { display: block; height: 100%; background: var(--accent); border-radius: 4px; opacity: .85; }
+.bar-row .bv { flex: 0 0 auto; font-family: var(--serif); font-weight: 600; font-size: 12px; white-space: nowrap; }
+.bar-row .bv .sub2 { font-family: var(--sans); font-weight: 400; font-size: 10.5px; color: var(--muted); }
 
 /* ---------- 其他 ---------- */
 .empty {

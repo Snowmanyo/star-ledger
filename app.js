@@ -372,7 +372,7 @@ const settleBadge = s => s === 'settled' ? '<span class="badge ok">已結清</sp
   : s === 'unsettled' ? '<span class="badge danger">未結清</span>' : '';
 
 /* ---------- 畫面 ---------- */
-const state = { tab: 'orders', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {} };
+const state = { tab: 'orders', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {}, oSearch: '', oChannel: '', oPayer: '', oStatus: '', evSeg: 'list', statYear: '' };
 
 function setTab(tab) {
   state.tab = tab;
@@ -406,10 +406,48 @@ function renderOrdersTab(view) {
   else bindProxy(view);
 }
 
+function orderSeqMap() {
+  const m = {};
+  DB.orders.slice()
+    .sort((a, b) => String(a.orderDate).localeCompare(String(b.orderDate)) || String(a.id).localeCompare(String(b.id)))
+    .forEach((o, i) => { m[o.id] = i + 1; });
+  return m;
+}
 function ordersListHtml() {
   if (!DB.orders.length) return emptyHtml('尚無訂單，點右下角＋新增');
-  const sorted = DB.orders.slice().sort((a, b) => String(b.orderDate).localeCompare(String(a.orderDate)));
-  return sorted.map(o => {
+  const seq = orderSeqMap();
+  const channels = [...new Set(DB.orders.map(o => o.channel).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hant'));
+  const payers = [...new Set(DB.orders.map(o => o.payer).filter(Boolean))].sort();
+  const q = state.oSearch.trim().toLowerCase();
+  const statusOpts = [['', '全部狀態'], ['unshipped', '未出貨'], ['shipped', '已出貨'], ['awaiting', '有待到貨'], ['unsettled', '未結清'], ['settled', '已結清']];
+  const sorted = DB.orders.filter(o => {
+    if (state.oChannel && o.channel !== state.oChannel) return false;
+    if (state.oPayer && o.payer !== state.oPayer) return false;
+    if (state.oStatus === 'unshipped' && o.actualShipDate) return false;
+    if (state.oStatus === 'shipped' && !o.actualShipDate) return false;
+    if (state.oStatus === 'awaiting' && !(o.items || []).some(it => !it.arrived)) return false;
+    if (state.oStatus === 'unsettled' && o.settled) return false;
+    if (state.oStatus === 'settled' && !o.settled) return false;
+    if (q) {
+      const hay = ['#' + seq[o.id], o.orderNumber, o.channel, o.payer, o.paymentDetail, o.notes]
+        .concat((o.items || []).flatMap(it => [it.name, it.variant, it.proxyFor]))
+        .join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }).sort((a, b) => String(b.orderDate).localeCompare(String(a.orderDate)) || (seq[b.id] - seq[a.id]));
+  let html = `<div class="searchbar">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <input id="o-search" placeholder="搜尋編號、通路、品名…" value="${esc(state.oSearch)}">
+  </div>
+  <div class="filter-row">
+    <select id="o-channel" class="${state.oChannel ? 'active' : ''}"><option value="">全部通路</option>${channels.map(c => `<option ${state.oChannel === c ? 'selected' : ''} value="${esc(c)}">${esc(c)}</option>`).join('')}</select>
+    <select id="o-payer" class="${state.oPayer ? 'active' : ''}"><option value="">全部付款人</option>${payers.map(p => `<option ${state.oPayer === p ? 'selected' : ''} value="${esc(p)}">${esc(p)}</option>`).join('')}</select>
+    <select id="o-status" class="${state.oStatus ? 'active' : ''}">${statusOpts.map(([v, l]) => `<option ${state.oStatus === v ? 'selected' : ''} value="${v}">${l}</option>`).join('')}</select>
+  </div>
+  <div class="section-note">${sorted.length} 筆訂單</div>`;
+  if (!sorted.length) html += emptyHtml('沒有符合條件的訂單');
+  return html + sorted.map(o => {
     const pending = (o.items || []).filter(it => !it.arrived).length;
     const badges = [
       o.actualShipDate ? '<span class="badge ok">已出貨</span>' : '<span class="badge">未出貨</span>',
@@ -419,7 +457,7 @@ function ordersListHtml() {
     const money = num(o.chargedTwd) ? fmtTwd(o.chargedTwd) : fmtMoney(o.currency, orderTotal(o));
     return `<div class="card tappable" data-order="${esc(o.id)}">
       <div class="row-head">
-        <div class="row-title">${esc(o.channel || '未填通路')}<span class="sub">${esc(o.orderNumber)}</span></div>
+        <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${seq[o.id]}</span> ${esc(o.channel || '未填通路')}<span class="sub">${esc(o.orderNumber)}</span></div>
         <div class="amount accent">${money}</div>
       </div>
       <div class="row-meta">
@@ -437,6 +475,12 @@ function bindOrdersList(view) {
     const o = DB.orders.find(x => x.id === el.dataset.order);
     if (o) openOrderForm(o);
   });
+  const si = $('#o-search', view);
+  if (!si) return;
+  si.oninput = () => { state.oSearch = si.value; render(); const el = $('#o-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
+  $('#o-channel', view).onchange = e => { state.oChannel = e.target.value; render(); };
+  $('#o-payer', view).onchange = e => { state.oPayer = e.target.value; render(); };
+  $('#o-status', view).onchange = e => { state.oStatus = e.target.value; render(); };
 }
 
 /* ----- 待到貨 ----- */
@@ -620,6 +664,24 @@ function renderSales(view) {
 
 /* ----- 活動 ----- */
 function renderEvents(view) {
+  const segs = [['list', '場次'], ['stats', '統計']];
+  let html = '<div class="seg">' + segs.map(([k, l]) =>
+    `<button data-eseg="${k}" class="${state.evSeg === k ? 'on' : ''}">${l}</button>`).join('') + '</div>';
+  html += state.evSeg === 'stats' ? eventStatsHtml() : eventListHtml();
+  view.innerHTML = html;
+  $$('[data-eseg]', view).forEach(b => b.onclick = () => { state.evSeg = b.dataset.eseg; render(); });
+  if (state.evSeg === 'stats') {
+    $$('[data-year]', view).forEach(b => b.onclick = () => { state.statYear = b.dataset.year; render(); });
+    return;
+  }
+  const si = $('#ev-search');
+  si.oninput = () => { state.evSearch = si.value; render(); const el = $('#ev-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
+  $$('[data-event]', view).forEach(el => el.onclick = () => {
+    const ev = DB.events.find(x => x.id === el.dataset.event);
+    if (ev) openEventForm(ev);
+  });
+}
+function eventListHtml() {
   const q = state.evSearch.trim();
   let list = DB.events.slice();
   if (q) list = list.filter(e => [e.name, e.artist, e.venue, e.city, e.liveTour, e.seriesEvent, e.seat, e.guest]
@@ -647,19 +709,90 @@ function renderEvents(view) {
       ${e.settled ? '<span class="badge ok">已結清</span>' : '<span class="badge danger">未結清</span>'}
     </div>
   </div>`).join('');
-  view.innerHTML = html;
-  const si = $('#ev-search');
-  si.oninput = () => { state.evSearch = si.value; render(); const el = $('#ev-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
-  $$('[data-event]', view).forEach(el => el.onclick = () => {
-    const ev = DB.events.find(x => x.id === el.dataset.event);
-    if (ev) openEventForm(ev);
+  return html;
+}
+function topCount(list, keyFn) {
+  const m = {};
+  list.forEach(e => {
+    keyFn(e).forEach(k => {
+      if (!k) return;
+      m[k] = m[k] || { n: 0, spend: 0 };
+      m[k].n++;
+      m[k].spend += num(e.ticketPriceTwd);
+    });
   });
+  return Object.entries(m).map(([label, v]) => ({ label, n: v.n, spend: v.spend }))
+    .sort((a, b) => b.n - a.n || b.spend - a.spend);
+}
+function barListHtml(title, rows, opts) {
+  if (!rows.length) return '';
+  const max = rows[0].n;
+  return `<div class="card"><div class="chart-title">${title}${opts && opts.mini ? `<span class="mini">${opts.mini}</span>` : ''}</div>` +
+    rows.map(r => `<div class="bar-row">
+      <span class="bl">${esc(r.label)}</span>
+      <span class="track"><i style="width:${Math.max(4, Math.round(r.n / max * 100))}%"></i></span>
+      <span class="bv">${fmtInt(r.n)} 場${r.spend ? ` <span class="sub2">${fmtInt(r.spend)} 元</span>` : ''}</span>
+    </div>`).join('') + '</div>';
+}
+function colChartHtml(title, cols) {
+  const max = Math.max(1, ...cols.map(c => c.n));
+  return `<div class="card"><div class="chart-title">${title}</div>
+    <div class="cols">${cols.map(c => `<div class="col"><em>${c.n || ''}</em><i style="height:${Math.round(c.n / max * 100)}%"></i></div>`).join('')}</div>
+    <div class="cols-labels">${cols.map(c => `<span>${c.label}</span>`).join('')}</div>
+  </div>`;
+}
+function eventStatsHtml() {
+  if (!DB.events.length) return emptyHtml('還沒有活動紀錄');
+  const years = [...new Set(DB.events.map(e => String(e.startDate || '').slice(0, 4)).filter(y => /^\d{4}$/.test(y)))].sort().reverse();
+  const y = state.statYear;
+  const evs = DB.events.filter(e => !y || String(e.startDate || '').startsWith(y));
+  const priced = evs.filter(e => num(e.ticketPriceTwd) > 0);
+  const spend = priced.reduce((s, e) => s + num(e.ticketPriceTwd), 0);
+  const artists = new Set(evs.map(e => e.artist).filter(Boolean));
+  const cities = new Set(evs.map(e => e.city).filter(Boolean));
+  const most = priced.slice().sort((a, b) => num(b.ticketPriceTwd) - num(a.ticketPriceTwd))[0];
+  const splitGuests = e => String(e.guest || '').split(/[、,，/／]/).map(s => s.trim()).filter(s => s && s !== '無' && s !== '-');
+
+  let html = `<div class="chips">
+    <button class="chip ${!y ? 'on' : ''}" data-year="">所有年份</button>
+    ${years.map(yy => `<button class="chip ${y === yy ? 'on' : ''}" data-year="${yy}">${yy}</button>`).join('')}
+  </div>
+  <div class="stat-strip">
+    <div class="stat"><div class="n">${evs.length}</div><div class="l">總場次</div></div>
+    <div class="stat"><div class="n">${fmtInt(spend)}</div><div class="l">總花費 TWD</div></div>
+    <div class="stat"><div class="n">${artists.size}</div><div class="l">不同藝人</div></div>
+  </div>
+  <div class="stat-strip">
+    <div class="stat"><div class="n">${cities.size}</div><div class="l">跑過城市</div></div>
+    <div class="stat"><div class="n">${priced.length ? fmtInt(spend / priced.length) : '—'}</div><div class="l">平均票價</div></div>
+    <div class="stat"><div class="n">${most ? fmtInt(most.ticketPriceTwd) : '—'}</div><div class="l">最貴場次</div></div>
+  </div>
+  ${most ? `<div class="section-note" style="text-align:center">最貴的場次：${esc(most.name)}（${esc(most.startDate)}）</div>` : ''}`;
+
+  if (!y && years.length > 1) {
+    const cols = years.slice().reverse().map(yy => ({ label: yy.slice(2), n: DB.events.filter(e => String(e.startDate || '').startsWith(yy)).length }));
+    html += colChartHtml('歷年場次趨勢', cols);
+  }
+  const months = Array.from({ length: 12 }, (_, i) => {
+    const mm = String(i + 1).padStart(2, '0');
+    return { label: i + 1, n: evs.filter(e => String(e.startDate || '').slice(5, 7) === mm).length };
+  });
+  html += colChartHtml(y ? y + ' 年月度場次' : '月度場次分布', months);
+  html += barListHtml('表演者 Top 10', topCount(evs, e => [e.artist]).slice(0, 10));
+  html += barListHtml('場館 Top 10', topCount(evs, e => [e.venue]).slice(0, 10));
+  html += barListHtml('城市分布', topCount(evs, e => [e.city]).slice(0, 10));
+  html += barListHtml('嘉賓統計 Top 10', topCount(evs, splitGuests).slice(0, 10).map(r => ({ label: r.label, n: r.n })));
+  html += barListHtml('活動類型', topCount(evs, e => [e.eventType]).slice(0, 10).map(r => ({ label: r.label, n: r.n })));
+  return html;
 }
 
 /* ----- 總帳 ----- */
+function groupStatus(g) {
+  return groupSettle(g.entries) || (g.ev ? (g.ev.settled ? 'settled' : 'unsettled') : null);
+}
 function renderLedger(view) {
-  const catChips = [['', '全部'], ['ticket', '票券'], ['transport', '交通'], ['lodging', '住宿'], ['other', '其他']];
-  const setChips = [['', '全部狀態'], ['settled', '已結清'], ['partial', '部分'], ['unsettled', '未結清']];
+  const catOpts = [['', '全部分類']].concat(Object.entries(CAT_LABEL));
+  const setOpts = [['', '全部狀態'], ['settled', '已結清'], ['partial', '部分結清'], ['unsettled', '未結清']];
   const q = state.search.trim();
   let entries = DB.ledger.slice();
   if (q) entries = entries.filter(l => {
@@ -678,7 +811,7 @@ function renderLedger(view) {
     const ev = DB.events.find(e => e.id === eid);
     return { eid, ev, entries: groups[eid], date: ev ? ev.startDate : (groups[eid][0].date || '') };
   });
-  if (state.settle) groupList = groupList.filter(g => groupSettle(g.entries) === state.settle);
+  if (state.settle) groupList = groupList.filter(g => groupStatus(g) === state.settle);
   groupList.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 
   const totalSpend = expenses.reduce((s, l) => s + num(l.amountTwd), 0);
@@ -689,8 +822,10 @@ function renderLedger(view) {
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     <input id="lg-search" placeholder="搜尋標題、活動、對象…" value="${esc(state.search)}">
   </div>
-  <div class="chips">${catChips.map(([k, l]) => `<button class="chip ${state.cat === k ? 'on' : ''}" data-cat="${k}">${l}</button>`).join('')}
-  ${setChips.map(([k, l]) => `<button class="chip ${state.settle === k ? 'on' : ''}" data-settle="${k}">${l}</button>`).join('')}</div>
+  <div class="filter-row two">
+    <select id="lg-cat" class="${state.cat ? 'active' : ''}">${catOpts.map(([k, l]) => `<option ${state.cat === k ? 'selected' : ''} value="${k}">${l}</option>`).join('')}</select>
+    <select id="lg-settle" class="${state.settle ? 'active' : ''}">${setOpts.map(([k, l]) => `<option ${state.settle === k ? 'selected' : ''} value="${k}">${l}</option>`).join('')}</select>
+  </div>
   <div class="stat-strip">
     <div class="stat"><div class="n">${fmtInt(totalSpend)}</div><div class="l">支出 TWD</div></div>
     <div class="stat"><div class="n">${fmtInt(totalIncome)}</div><div class="l">收入 TWD</div></div>
@@ -714,7 +849,7 @@ function renderLedger(view) {
       <button class="group-head">
         <span class="main" style="text-align:left;min-width:0">
           <span class="row-title" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</span>
-          <span class="row-meta">${esc(g.date || '')} ${settleBadge(groupSettle(g.entries))}</span>
+          <span class="row-meta">${esc(g.date || '')} ${settleBadge(groupStatus(g))}</span>
         </span>
         <span style="display:flex;align-items:center;gap:8px;flex:0 0 auto"><span class="amount">${fmtInt(sum)}</span><span class="caret">›</span></span>
       </button>
@@ -725,8 +860,8 @@ function renderLedger(view) {
 
   const si = $('#lg-search');
   si.oninput = () => { state.search = si.value; render(); const el = $('#lg-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
-  $$('[data-cat]', view).forEach(b => b.onclick = () => { state.cat = b.dataset.cat; render(); });
-  $$('[data-settle]', view).forEach(b => b.onclick = () => { state.settle = b.dataset.settle; render(); });
+  $('#lg-cat', view).onchange = e => { state.cat = e.target.value; render(); };
+  $('#lg-settle', view).onchange = e => { state.settle = e.target.value; render(); };
   bindGroups(view);
   $$('[data-ledger]', view).forEach(el => el.onclick = e => {
     e.stopPropagation();
@@ -904,7 +1039,10 @@ function openOrderForm(existing) {
     const ownOpts = Object.entries(OWN_LABEL).map(([v, l]) => [v, l]);
     return `<div class="item-block" data-item="${i}">
       <div class="item-block-head"><span class="no">品項 ${i + 1}</span>
-        <button class="btn danger small" data-del-item="${i}">移除</button></div>
+        <span>
+          <button class="btn line small" data-copy-item="${i}">複製</button>
+          <button class="btn danger small" data-del-item="${i}">移除</button>
+        </span></div>
       <div class="field"><label>品名</label><input data-k="name" data-i="${i}" value="${esc(it.name)}"></div>
       <div class="field-row">
         <div class="field"><label>版本／規格</label><input data-k="variant" data-i="${i}" value="${esc(it.variant)}"></div>
@@ -1028,6 +1166,15 @@ function openOrderForm(existing) {
     $('#intl-hint').textContent = est ? `依重量估算：約 ${fmtTwd(est)}${num(o.internationalShippingTwd) ? '' : '（儲存時自動帶入）'}` : '';
   }
   function rebindItems() {
+    $$('#items-wrap [data-copy-item]').forEach(b => b.onclick = () => {
+      readItems();
+      const i = Number(b.dataset.copyItem);
+      const copy = Object.assign({}, o.items[i], { id: uid() });
+      o.items.splice(i + 1, 0, copy);
+      $('#items-wrap').innerHTML = o.items.map(itemBlock).join('');
+      rebindItems();
+      refreshTotals();
+    });
     $$('#items-wrap [data-del-item]').forEach(b => b.onclick = () => {
       readItems();
       o.items.splice(Number(b.dataset.delItem), 1);
@@ -1117,10 +1264,7 @@ function openEventForm(existing) {
     ${fieldHtml('表演者', `<input id="e-artist" list="dl-artist" value="${esc(ev.artist)}">`)}
     ${fieldHtml('場次編號', `<input id="e-eventNumber" type="number" inputmode="numeric" value="${esc(ev.eventNumber)}">`)}
   </div>
-  <div class="field-row">
-    ${fieldHtml('開始日期', `<input id="e-startDate" type="date" value="${esc(ev.startDate)}">`)}
-    ${fieldHtml('結束日期', `<input id="e-endDate" type="date" value="${esc(ev.endDate)}">`)}
-  </div>
+  ${fieldHtml('活動日期', `<input id="e-startDate" type="date" value="${esc(ev.startDate)}">`)}
   <div class="field-row">
     ${fieldHtml('城市', `<input id="e-city" value="${esc(ev.city)}">`)}
     ${fieldHtml('場地', `<input id="e-venue" value="${esc(ev.venue)}">`)}
@@ -1152,13 +1296,16 @@ function openEventForm(existing) {
   ${relatedHtml}`}
   <div class="divider"></div>
   <button class="btn primary" id="event-save">儲存活動</button>
-  ${isNew ? '' : '<button class="btn danger" id="event-del">刪除活動</button>'}`;
+  ${isNew ? '' : `<div class="btn-row">
+    <button class="btn line" id="event-copy">複製整場</button>
+    <button class="btn danger" id="event-del">刪除活動</button>
+  </div>`}`;
 
   openSheet(html);
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'eventNumber', 'startDate', 'endDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
+    ['name', 'artist', 'eventNumber', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     const p = $('#e-ticketPriceTwd').value;
     ev.ticketPriceTwd = p === '' ? '' : num(p);
     ev.settled = $('#e-settled').checked;
@@ -1171,6 +1318,18 @@ function openEventForm(existing) {
     toast('活動已儲存');
   };
   if (!isNew) {
+    $('#event-copy').onclick = () => {
+      readEvent();
+      const copy = JSON.parse(JSON.stringify(ev));
+      copy.id = uid();
+      copy.eventNumber = String(DB.events.reduce((m, e) => Math.max(m, num(e.eventNumber)), 0) + 1);
+      copy.createdAt = today();
+      saveEvent(copy);
+      closeSheet();
+      render();
+      toast('已複製整場活動');
+      openEventForm(copy);
+    };
     $('#event-del').onclick = () => {
       if (!confirm('刪除這場活動？相關總帳流水會保留但解除連結。')) return;
       deleteEvent(ev);

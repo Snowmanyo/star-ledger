@@ -377,18 +377,25 @@ const state = { tab: 'orders', seg: 'list', search: '', evSearch: '', cat: '', s
 function setTab(tab) {
   state.tab = tab;
   state.openGroups = {};
-  render();
+  render(true);
 }
-function render() {
+function render(scrollTop) {
   $('#page-title').textContent = TAB_TITLE[state.tab];
   $$('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
   $('#fab').classList.toggle('hide', state.tab === 'sales' || state.tab === 'settings');
   const view = $('#view');
+  const chipsPos = $$('.chips', view).map(c => c.scrollLeft);
+  const y = window.scrollY;
   if (state.tab === 'orders') renderOrdersTab(view);
   else if (state.tab === 'sales') renderSales(view);
   else if (state.tab === 'events') renderEvents(view);
   else if (state.tab === 'ledger') renderLedger(view);
   else renderSettings(view);
+  if (scrollTop === true) window.scrollTo(0, 0);
+  else {
+    $$('.chips', view).forEach((c, i) => { if (chipsPos[i]) c.scrollLeft = chipsPos[i]; });
+    if (y) window.scrollTo(0, y);
+  }
 }
 
 /* ----- 訂單頁（含待到貨、代購） ----- */
@@ -466,7 +473,10 @@ function ordersListHtml() {
         ${o.estimatedShipDate ? `<span>預計 ${esc(o.estimatedShipDate)}</span>` : ''}
         ${o.payer ? `<span>付款 ${esc(o.payer)}</span>` : ''}
       </div>
-      <div style="margin-top:6px">${badges}</div>
+      <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div style="min-width:0">${badges}</div>
+        <button class="btn line small" style="padding:3px 12px;font-size:12px;flex:0 0 auto" data-copy-order="${esc(o.id)}">複製</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -474,6 +484,15 @@ function bindOrdersList(view) {
   $$('[data-order]', view).forEach(el => el.onclick = () => {
     const o = DB.orders.find(x => x.id === el.dataset.order);
     if (o) openOrderForm(o);
+  });
+  $$('[data-copy-order]', view).forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    const src = DB.orders.find(x => x.id === b.dataset.copyOrder);
+    if (!src) return;
+    const copy = copyOrder(src);
+    saveOrder(copy, []);
+    render();
+    toast('已複製整筆訂單，可點進去修改');
   });
   const si = $('#o-search', view);
   if (!si) return;
@@ -682,11 +701,21 @@ function renderEvents(view) {
   });
 }
 function eventListHtml() {
-  const q = state.evSearch.trim();
+  const q = state.evSearch.trim().toLowerCase();
   let list = DB.events.slice();
   if (q) list = list.filter(e => [e.name, e.artist, e.venue, e.city, e.liveTour, e.seriesEvent, e.seat, e.guest]
-    .some(v => String(v || '').includes(q)));
-  list.sort((a, b) => (num(b.eventNumber) - num(a.eventNumber)) || String(b.startDate).localeCompare(String(a.startDate)));
+    .some(v => String(v || '').toLowerCase().includes(q)));
+  const numbered = DB.events.filter(e => num(e.eventNumber) && e.startDate);
+  const sortKey = e => {
+    const n = num(e.eventNumber);
+    if (n) return n;
+    const d = String(e.startDate || '');
+    if (!d) return 0;
+    let best = 0;
+    numbered.forEach(x => { if (String(x.startDate) <= d) best = Math.max(best, num(x.eventNumber)); });
+    return best + 0.5;
+  };
+  list.sort((a, b) => (sortKey(b) - sortKey(a)) || String(b.startDate).localeCompare(String(a.startDate)));
   let html = `<div class="searchbar">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     <input id="ev-search" placeholder="搜尋活動、歌手、場地…" value="${esc(state.evSearch)}">
@@ -797,7 +826,7 @@ function renderLedger(view) {
   let entries = DB.ledger.slice();
   if (q) entries = entries.filter(l => {
     const ev = DB.events.find(e => e.id === l.eventId);
-    return [l.title, l.counterparty, l.payer, l.notes, l.attendee, ev && ev.name].some(v => String(v || '').includes(q));
+    return [l.title, l.counterparty, l.payer, l.notes, l.attendee, ev && ev.name].some(v => String(v || '').toLowerCase().includes(q.toLowerCase()));
   });
   if (state.cat) entries = entries.filter(l => state.cat === 'other'
     ? !['ticket', 'transport', 'lodging'].includes(l.category)
@@ -1113,12 +1142,13 @@ function openOrderForm(existing) {
   <label class="check-row">已結清 <input type="checkbox" id="f-settled" ${o.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="f-notes" rows="2">${esc(o.notes)}</textarea>`)}
 
-  <div class="divider"></div>
-  <button class="btn primary" id="order-save">儲存訂單</button>
-  ${isNew ? '' : `<div class="btn-row">
-    <button class="btn line" id="order-copy">複製整筆</button>
-    <button class="btn danger" id="order-del">刪除訂單</button>
-  </div>`}`;
+  <div class="sheet-actions">
+    <button class="btn primary" id="order-save">儲存訂單</button>
+    ${isNew ? '' : `<div class="btn-row">
+      <button class="btn line" id="order-copy">複製整筆</button>
+      <button class="btn danger" id="order-del">刪除訂單</button>
+    </div>`}
+  </div>`;
 
   const sheet = openSheet(html);
   $('#sh-close').onclick = closeSheet;
@@ -1294,12 +1324,13 @@ function openEventForm(existing) {
   </div>
   <div class="hint">新增後會同步寫入追星總帳；票券金額與座位會回寫此活動。</div>
   ${relatedHtml}`}
-  <div class="divider"></div>
-  <button class="btn primary" id="event-save">儲存活動</button>
-  ${isNew ? '' : `<div class="btn-row">
-    <button class="btn line" id="event-copy">複製整場</button>
-    <button class="btn danger" id="event-del">刪除活動</button>
-  </div>`}`;
+  <div class="sheet-actions">
+    <button class="btn primary" id="event-save">儲存活動</button>
+    ${isNew ? '' : `<div class="btn-row">
+      <button class="btn line" id="event-copy">複製整場</button>
+      <button class="btn danger" id="event-del">刪除活動</button>
+    </div>`}
+  </div>`;
 
   openSheet(html);
   $('#sh-close').onclick = closeSheet;
@@ -1312,6 +1343,9 @@ function openEventForm(existing) {
   }
   $('#event-save').onclick = () => {
     readEvent();
+    if (!String(ev.eventNumber).trim()) {
+      ev.eventNumber = String(DB.events.reduce((m, e) => Math.max(m, num(e.eventNumber)), 0) + 1);
+    }
     saveEvent(ev);
     closeSheet();
     render();
@@ -1418,9 +1452,10 @@ function openLedgerForm(existing, preset) {
     ${fieldHtml('票券狀態', `<input id="l-ticketStatus" list="dl-tstatus" value="${esc(l.ticketStatus)}"><datalist id="dl-tstatus"><option value="已使用"><option value="未使用"><option value="轉讓"><option value="退票"></datalist>`)}
   </div>
   ${fieldHtml('備註', `<textarea id="l-notes" rows="2">${esc(l.notes)}</textarea>`)}
-  <div class="divider"></div>
-  <button class="btn primary" id="ledger-save">儲存流水</button>
-  ${isNew ? '' : '<button class="btn danger" id="ledger-del">刪除流水</button>'}`;
+  <div class="sheet-actions">
+    <button class="btn primary" id="ledger-save">儲存流水</button>
+    ${isNew ? '' : '<button class="btn danger" id="ledger-del">刪除流水</button>'}
+  </div>`;
 
   openSheet(html);
   $('#sh-close').onclick = closeSheet;

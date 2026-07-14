@@ -3,6 +3,11 @@
 // 「執行身分：我」、「誰可以存取：知道連結的任何人」→ 複製網頁應用程式網址貼到 App 設定頁。
 
 const SHARED_KEY = ''; // 可自訂一組密碼，App 設定頁需填相同的值；留空表示不驗證
+const SHEET_ID = ''; // 從試算表「擴充功能→Apps Script」開的專案留空；獨立專案填試算表網址 /d/ 後面那串 ID
+
+function ss_() {
+  return SHEET_ID ? SpreadsheetApp.openById(SHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+}
 
 const TABLES = {
   orders: ['id', 'orderNumber', 'channel', 'orderDate', 'estimatedShipDate', 'actualShipDate', 'currency', 'domesticShipping', 'internationalShippingTwd', 'internationalShippingRateTwdPerKg', 'discountAmount', 'weightGrams', 'exchangeRate', 'chargedTwd', 'payer', 'paymentMethod', 'paymentDetail', 'settled', 'notes'],
@@ -13,7 +18,7 @@ const TABLES = {
 };
 
 function setup_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = ss_();
   Object.keys(TABLES).forEach(function (name) {
     let sheet = ss.getSheetByName(name);
     if (!sheet) sheet = ss.insertSheet(name);
@@ -28,7 +33,7 @@ function setup_() {
 }
 
 function readTable_(name) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  const sheet = ss_().getSheetByName(name);
   const cols = TABLES[name];
   const last = sheet.getLastRow();
   if (last < 2) return [];
@@ -44,7 +49,7 @@ function readTable_(name) {
 }
 
 function writeRows_(name, rows) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  const sheet = ss_().getSheetByName(name);
   const cols = TABLES[name];
   const last = sheet.getLastRow();
   const ids = {};
@@ -63,7 +68,7 @@ function writeRows_(name, rows) {
 }
 
 function deleteRows_(name, idList) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  const sheet = ss_().getSheetByName(name);
   const last = sheet.getLastRow();
   if (last < 2) return;
   const values = sheet.getRange(2, 1, last - 1, 1).getDisplayValues();
@@ -77,7 +82,7 @@ function deleteRows_(name, idList) {
 function replaceAll_(data) {
   Object.keys(TABLES).forEach(function (name) {
     if (!data[name]) return;
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+    const sheet = ss_().getSheetByName(name);
     const last = sheet.getLastRow();
     if (last >= 2) sheet.getRange(2, 1, last - 1, TABLES[name].length).clearContent();
     writeRows_(name, data[name]);

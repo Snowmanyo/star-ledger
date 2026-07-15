@@ -38,12 +38,22 @@ const ICONS = {
   copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
   trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 7V5h4v2M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  back: '<svg viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
-function sheetTitleHtml(title, withDelete, delId) {
-  return `<div class="sheet-title">${title}<span class="sheet-title-actions">
+function sheetTitleHtml(title, withDelete, delId, withBack) {
+  return `<div class="sheet-title">
+    <span style="display:flex;align-items:center;gap:10px;min-width:0">
+      ${withBack ? `<button class="icon-mini" id="sh-back" aria-label="返回">${ICONS.back}</button>` : ''}
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</span>
+    </span>
+    <span class="sheet-title-actions">
     ${withDelete ? `<button class="icon-mini danger" id="${delId}" aria-label="刪除">${ICONS.trash}</button>` : ''}
     <button class="icon-mini" id="sh-close" aria-label="關閉">${ICONS.close}</button>
   </span></div>`;
+}
+function seatText(l) {
+  const part = (v, suf) => v ? (String(v).endsWith(suf) ? String(v) : v + suf) : '';
+  return [l.ticketArea || '', part(l.ticketRow, '排'), part(l.ticketSeat, '號')].filter(Boolean).join(' ');
 }
 
 const NUMF = {
@@ -373,35 +383,51 @@ function deleteEvent(ev) {
   if (orphans.length) ops.push({ action: 'upsert', table: 'ledger', rows: orphans });
   pushOps(ops);
 }
+// 活動的票價與座位由掛在它底下的票券流水彙整而來
+function syncEventFromTickets(eventId) {
+  const ev = DB.events.find(e => e.id === eventId);
+  if (!ev) return null;
+  const tickets = DB.ledger.filter(l => l.eventId === eventId && l.category === 'ticket');
+  if (!tickets.length) return null;
+  ev.ticketPriceTwd = tickets.reduce((s, l) => s + num(l.amountTwd), 0);
+  const seats = tickets.map(seatText).filter(Boolean);
+  if (seats.length) ev.seat = seats.join(' ');
+  return ev;
+}
 function saveLedger(entry) {
   const i = DB.ledger.findIndex(l => l.id === entry.id);
   if (i >= 0) DB.ledger[i] = entry; else DB.ledger.unshift(entry);
   const ops = [{ action: 'upsert', table: 'ledger', rows: [entry] }];
-  if (entry.category === 'ticket' && entry.eventId) {
-    const ev = DB.events.find(e => e.id === entry.eventId);
-    if (ev) {
-      if (num(entry.amountTwd)) ev.ticketPriceTwd = num(entry.amountTwd);
-      const seat = [entry.ticketArea, entry.ticketRow && entry.ticketRow + '排', entry.ticketSeat && entry.ticketSeat + '號']
-        .filter(Boolean).join(' ');
-      if (seat) ev.seat = seat;
-      ops.push({ action: 'upsert', table: 'events', rows: [ev] });
-    }
+  if (entry.eventId) {
+    const ev = syncEventFromTickets(entry.eventId);
+    if (ev) ops.push({ action: 'upsert', table: 'events', rows: [ev] });
   }
   saveDB();
   pushOps(ops);
 }
 function deleteLedger(entry) {
   DB.ledger = DB.ledger.filter(l => l.id !== entry.id);
+  const ops = [{ action: 'delete', table: 'ledger', ids: [entry.id] }];
+  if (entry.eventId) {
+    const ev = syncEventFromTickets(entry.eventId);
+    if (ev) ops.push({ action: 'upsert', table: 'events', rows: [ev] });
+  }
   saveDB();
-  pushOps([{ action: 'delete', table: 'ledger', ids: [entry.id] }]);
+  pushOps(ops);
 }
 
 /* ---------- 總帳彙整 ---------- */
 function entrySettle(l) {
   const exp = num(l.expectedReceivableTwd);
-  if (!exp) return null;
-  const got = num(l.receivedTwd);
-  return got >= exp ? 'settled' : got > 0 ? 'partial' : 'unsettled';
+  if (exp) {
+    const got = num(l.receivedTwd);
+    return got >= exp ? 'settled' : got > 0 ? 'partial' : 'unsettled';
+  }
+  if (l.settled === undefined || l.settled === null || l.settled === '') {
+    const ev = DB.events.find(e => e.id === l.eventId);
+    return ev ? (ev.settled ? 'settled' : 'unsettled') : null;
+  }
+  return toBool(l.settled) ? 'settled' : 'unsettled';
 }
 function groupSettle(entries) {
   const states = entries.map(entrySettle).filter(Boolean);
@@ -773,10 +799,11 @@ function eventListHtml() {
   </div>
   <div class="section-note">${list.length} 場活動</div>`;
   if (!list.length) html += emptyHtml('沒有符合的活動');
+  const evTitle = e => (e.eventType === '拼盤' || !e.artist || String(e.name).includes(e.artist))
+    ? e.name : e.artist + ' - ' + e.name;
   html += list.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
     <div class="row-head">
-      <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${esc(e.eventNumber || '–')}</span> ${esc(e.name)}</div>
-      ${num(e.ticketPriceTwd) ? `<div class="amount">${fmtInt(e.ticketPriceTwd)}</div>` : ''}
+      <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${esc(e.eventNumber || '–')}</span> ${esc(evTitle(e))}</div>
     </div>
     <div class="row-meta">
       <span>${esc(e.startDate || '—')}</span>
@@ -954,7 +981,7 @@ function renderLedger(view) {
 }
 function ledgerRowHtml(l) {
   const st = entrySettle(l);
-  const seat = [l.ticketArea, l.ticketRow && l.ticketRow + '排', l.ticketSeat && l.ticketSeat + '號'].filter(Boolean).join(' ');
+  const seat = seatText(l);
   return `<div class="group-row tappable" data-ledger="${esc(l.id)}">
     <div class="main">
       <div style="font-size:13.5px">${esc(l.title || CAT_LABEL[l.category] || '未命名')}
@@ -1318,8 +1345,8 @@ function openEventForm(existing) {
   const relatedHtml = related.length ? related.map(l => `
     <div class="group-row tappable" data-rel-ledger="${esc(l.id)}" style="border:1px solid var(--line);border-radius:12px;margin-bottom:8px">
       <div class="main">
-        <div style="font-size:13px">${esc(l.title || CAT_LABEL[l.category] || '')} <span class="badge">${esc(CAT_LABEL[l.category] || '')}</span></div>
-        <div class="row-meta"><span>${esc(l.date)}</span>${l.payer ? `<span>${esc(l.payer)}</span>` : ''}</div>
+        <div style="font-size:13px">${esc(l.title || CAT_LABEL[l.category] || '')} <span class="badge">${esc(CAT_LABEL[l.category] || '')}</span> ${settleBadge(entrySettle(l))}</div>
+        <div class="row-meta"><span>${esc(l.date)}</span>${l.payer ? `<span>${esc(l.payer)}</span>` : ''}${seatText(l) ? `<span>${esc(seatText(l))}</span>` : ''}</div>
       </div>
       <span class="amount">${fmtInt(l.amountTwd)}</span>
     </div>`).join('') : '<div class="section-note">尚無相關流水</div>';
@@ -1342,10 +1369,7 @@ function openEventForm(existing) {
     ${fieldHtml('LIVE TOUR', `<input id="e-liveTour" value="${esc(ev.liveTour)}">`)}
   </div>
   ${fieldHtml('系列場次', `<input id="e-seriesEvent" placeholder="例：NO.68" value="${esc(ev.seriesEvent)}">`)}
-  <div class="field-row">
-    ${fieldHtml('座位', `<input id="e-seat" value="${esc(ev.seat)}">`)}
-    ${fieldHtml('票價（台幣）', `<input id="e-ticketPriceTwd" type="number" inputmode="numeric" value="${esc(ev.ticketPriceTwd)}">`)}
-  </div>
+  ${num(ev.ticketPriceTwd) || ev.seat ? `<div class="hint">座位與票價由下方「相關流水」的票券彙整：${ev.seat ? esc(ev.seat) + '｜' : ''}${num(ev.ticketPriceTwd) ? fmtTwd(ev.ticketPriceTwd) : ''}</div>` : ''}
   <div class="field-row">
     ${fieldHtml('嘉賓', `<input id="e-guest" value="${esc(ev.guest)}">`)}
     ${fieldHtml('付款人', `<input id="e-payer" list="dl-payer2" value="${esc(ev.payer)}">`)}
@@ -1370,9 +1394,7 @@ function openEventForm(existing) {
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
-    const p = $('#e-ticketPriceTwd').value;
-    ev.ticketPriceTwd = p === '' ? '' : num(p);
+    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     ev.settled = $('#e-settled').checked;
   }
   $('#event-save').onclick = () => {
@@ -1396,25 +1418,27 @@ function openEventForm(existing) {
       openLedgerForm(null, {
         category: b.dataset.addCat, eventId: ev.id, date: ev.startDate,
         title: ev.name + '｜' + CAT_LABEL[b.dataset.addCat], payer: ev.payer,
-        amountTwd: b.dataset.addCat === 'ticket' ? ev.ticketPriceTwd : '',
-      });
+      }, ev.id);
     });
     $$('[data-rel-ledger]').forEach(el => el.onclick = () => {
       const l = DB.ledger.find(x => x.id === el.dataset.relLedger);
-      if (l) openLedgerForm(l);
+      if (l) openLedgerForm(l, null, ev.id);
     });
   }
 }
 
 /* ---------- 總帳表單 ---------- */
-function openLedgerForm(existing, preset) {
+function openLedgerForm(existing, preset, backEventId) {
   const isNew = !existing;
   const l = existing ? JSON.parse(JSON.stringify(existing)) : Object.assign({
     id: uid(), type: 'expense', category: 'ticket', date: today(), title: '', eventId: '',
     amountTwd: '', currency: '', originalAmount: '', exchangeRate: '', payer: '', paymentMethod: '',
-    paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', notes: '',
+    paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: false, notes: '',
     ticketType: '', ticketArea: '', ticketRow: '', ticketSeat: '', attendee: '', ticketStatus: '', createdAt: today(),
   }, preset || {});
+  const settledChecked = (l.settled === undefined || l.settled === null || l.settled === '')
+    ? !!(DB.events.find(e => e.id === l.eventId) || {}).settled
+    : toBool(l.settled);
 
   const evOpts = [['', '不指定活動']].concat(
     DB.events.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)))
@@ -1424,7 +1448,7 @@ function openLedgerForm(existing, preset) {
   const curOpts = [['', '—']].concat(CURRENCIES.map(c => [c, c]));
 
   const html = `
-  ${sheetTitleHtml(isNew ? '新增流水' : '編輯流水', !isNew, 'ledger-del')}
+  ${sheetTitleHtml(isNew ? '新增流水' : '編輯流水', !isNew, 'ledger-del', !!backEventId)}
   <div class="seg" id="l-type">
     <button data-type="expense" class="${l.type !== 'income' ? 'on' : ''}">支出</button>
     <button data-type="income" class="${l.type === 'income' ? 'on' : ''}">收入</button>
@@ -1449,6 +1473,7 @@ function openLedgerForm(existing, preset) {
   </div>
   <datalist id="dl-payer3">${datalistOptions(DB.ledger.map(x => x.payer).concat(DB.orders.map(x => x.payer)))}</datalist>
   ${fieldHtml('付款工具', `<input id="l-paymentDetail" value="${esc(l.paymentDetail)}">`)}
+  <label class="check-row">已結清 <input type="checkbox" id="l-settled" ${settledChecked ? 'checked' : ''}></label>
 
   <div class="form-section">分帳</div>
   ${fieldHtml('對象', `<input id="l-counterparty" value="${esc(l.counterparty)}">`)}
@@ -1477,6 +1502,11 @@ function openLedgerForm(existing, preset) {
 
   openSheet(html);
   $('#sh-close').onclick = closeSheet;
+  const goBack = () => {
+    const ev = DB.events.find(e => e.id === backEventId);
+    if (ev) openEventForm(ev); else closeSheet();
+  };
+  if (backEventId) $('#sh-back').onclick = goBack;
 
   $$('#l-type button').forEach(b => b.onclick = () => {
     l.type = b.dataset.type;
@@ -1492,22 +1522,23 @@ function openLedgerForm(existing, preset) {
     l.eventId = l.type === 'income' ? '' : $('#l-eventId').value;
     l.paymentMethod = $('#l-paymentMethod').value;
     l.currency = $('#l-currency').value;
+    l.settled = $('#l-settled').checked;
     ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd'].forEach(k => {
       const v = $('#l-' + k).value;
       l[k] = v === '' ? '' : num(v);
     });
     saveLedger(l);
-    closeSheet();
     render();
     toast('流水已儲存');
+    if (backEventId) goBack(); else closeSheet();
   };
   if (!isNew) {
     $('#ledger-del').onclick = () => {
       if (!confirm('刪除這筆流水？')) return;
       deleteLedger(l);
-      closeSheet();
       render();
       toast('流水已刪除');
+      if (backEventId) goBack(); else closeSheet();
     };
   }
 }

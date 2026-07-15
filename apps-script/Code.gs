@@ -14,7 +14,7 @@ const TABLES = {
   items: ['id', 'orderId', 'name', 'variant', 'unitPrice', 'quantity', 'ownership', 'proxyFor', 'arrived', 'sorted', 'proxyPaid', 'salePriceTwd', 'soldQuantity'],
   sales: ['id', 'sourceOrderId', 'sourceItemId', 'sourceOrderNumber', 'sourceChannel', 'name', 'variant', 'sourceCurrency', 'unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity', 'managedByOwnership', 'createdAt'],
   events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt'],
-  ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt'],
+  ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt', 'settled'],
 };
 
 function setup_() {
@@ -24,7 +24,7 @@ function setup_() {
     if (!sheet) sheet = ss.insertSheet(name);
     const cols = TABLES[name];
     const first = sheet.getRange(1, 1, 1, cols.length).getValues()[0];
-    if (String(first[0]) !== cols[0]) {
+    if (cols.some(function (c, i) { return String(first[i]) !== c; })) {
       sheet.getRange('A:Z').setNumberFormat('@'); // 全文字格式，避免長訂單編號被轉成數字失去精度
       sheet.getRange(1, 1, 1, cols.length).setValues([cols]).setFontWeight('bold');
       sheet.setFrozenRows(1);

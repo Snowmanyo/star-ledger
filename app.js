@@ -154,6 +154,7 @@ async function doSync(silent) {
     DB = assembleDB(raw);
     saveDB();
     clearDirty();
+    migrateTitles();
     CFG.lastSync = new Date().toLocaleString('zh-TW', { hour12: false });
     saveCfg();
     render();
@@ -441,7 +442,7 @@ const settleBadge = s => s === 'settled' ? '<span class="badge ok">已結清</sp
   : s === 'unsettled' ? '<span class="badge danger">未結清</span>' : '';
 
 /* ---------- 畫面 ---------- */
-const state = { tab: 'home', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {}, oSearch: '', oChannel: '', oPayer: '', oStatus: '', evSeg: 'list', statYear: '' };
+const state = { tab: 'home', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {}, oSearch: '', oChannel: '', oPayer: '', oStatus: '', evSeg: 'list', statYear: '', lgSeg: 'flow' };
 const savedUi = JSON.parse(localStorage.getItem('sl-ui') || '{}');
 if (TAB_TITLE[savedUi.tab]) state.tab = savedUi.tab;
 if (savedUi.seg) state.seg = savedUi.seg;
@@ -497,23 +498,9 @@ function renderHome(view) {
   const dateLine = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日 · 星期${weekdays[now.getDay()]}`;
   const upcoming = DB.events.filter(e => String(e.startDate || '') >= t)
     .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate))).slice(0, 5);
-  let pendingQty = 0, proxyUnpaid = 0;
-  DB.orders.forEach(o => (o.items || []).forEach(it => {
-    if (!it.arrived) pendingQty += num(it.quantity);
-    if (it.ownership === 'proxy' && !it.proxyPaid) proxyUnpaid += computeUnitCostTwd(o, it) * num(it.quantity);
-  }));
+  const pendingOrders = DB.orders.filter(o => (o.items || []).some(it => !it.arrived)).length;
   const unsettled = DB.events.filter(e => !e.settled).length;
   const daysTo = d => Math.ceil((new Date(d) - now) / 86400000);
-
-  const todoCard = (key, label, value, cls) => `<button class="group-head" style="margin-bottom:10px" data-goto="${key}">
-      <span class="row-title">${label}</span>
-      <span style="display:flex;align-items:center;gap:8px"><span class="badge ${cls}">${value}</span><span class="caret">›</span></span>
-    </button>`;
-  let todos = '';
-  if (pendingQty) todos += todoCard('arrivals', '待到貨', fmtInt(pendingQty) + ' 件', 'warn');
-  if (proxyUnpaid) todos += todoCard('proxy', '代購未收', fmtTwd(proxyUnpaid), 'danger');
-  if (unsettled) todos += todoCard('unsettled', '未結清場次', fmtInt(unsettled) + ' 場', 'danger');
-  if (isDirty()) todos += todoCard('settings', '有變更尚未上傳', '前往設定', 'accent');
 
   view.innerHTML = `
   <div class="section-note" style="letter-spacing:.1em">${dateLine}</div>
@@ -522,7 +509,6 @@ function renderHome(view) {
     <button class="stat" data-quick="event"><div class="n">＋</div><div class="l">新增活動</div></button>
     <button class="stat" data-quick="ledger"><div class="n">＋</div><div class="l">新增流水</div></button>
   </div>
-  ${todos ? `<div class="form-section" style="margin-top:18px">待辦提醒</div>${todos}` : ''}
   <div class="form-section" style="margin-top:18px">即將到來的活動</div>
   ${upcoming.length ? upcoming.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
     <div class="row-head">
@@ -534,7 +520,16 @@ function renderHome(view) {
       ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
       ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
     </div>
-  </div>`).join('') : emptyHtml('近期沒有安排活動')}`;
+  </div>`).join('') : emptyHtml('近期沒有安排活動')}
+  <div class="form-section" style="margin-top:18px">待辦提醒</div>
+  <div class="stat-strip" style="grid-template-columns:1fr 1fr">
+    <button class="stat" data-goto="arrivals"><div class="n">${fmtInt(pendingOrders)}</div><div class="l">待到貨訂單</div></button>
+    <button class="stat" data-goto="unsettled"><div class="n">${fmtInt(unsettled)}</div><div class="l">未結清場次</div></button>
+  </div>
+  ${isDirty() ? `<button class="group-head" style="margin-bottom:10px" data-goto="settings">
+    <span class="row-title">有變更尚未上傳</span>
+    <span style="display:flex;align-items:center;gap:8px"><span class="badge accent">前往設定</span><span class="caret">›</span></span>
+  </button>` : ''}`;
 
   $$('[data-quick]', view).forEach(b => b.onclick = () => {
     if (b.dataset.quick === 'order') openOrderForm(null);
@@ -544,7 +539,7 @@ function renderHome(view) {
   $$('[data-goto]', view).forEach(b => b.onclick = () => {
     const k = b.dataset.goto;
     if (k === 'arrivals' || k === 'proxy') { state.seg = k; setTab('orders'); }
-    else if (k === 'unsettled') { state.settle = 'unsettled'; setTab('ledger'); }
+    else if (k === 'unsettled') { state.settle = 'unsettled'; state.lgSeg = 'flow'; setTab('ledger'); }
     else setTab('settings');
   });
   $$('[data-event]', view).forEach(el => el.onclick = () => {
@@ -886,6 +881,7 @@ function eventListHtml() {
   html += list.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
     <div class="row-head">
       <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${esc(e.eventNumber || '–')}</span> ${esc(evTitle(e))}</div>
+      ${num(e.ticketPriceTwd) ? `<div class="amount">${fmtInt(e.ticketPriceTwd)}</div>` : ''}
     </div>
     <div class="row-meta">
       <span>${esc(e.startDate || '—')}</span>
@@ -982,7 +978,77 @@ function eventStatsHtml() {
 function groupStatus(g) {
   return groupSettle(g.entries) || (g.ev ? (g.ev.settled ? 'settled' : 'unsettled') : null);
 }
+/* 分帳總覽：誰付了多少、互相應給多少 */
+function splitHtml() {
+  const paidBy = {};
+  DB.ledger.forEach(l => { if (l.payer && num(l.amountTwd)) paidBy[l.payer] = (paidBy[l.payer] || 0) + num(l.amountTwd); });
+  const paidRows = Object.entries(paidBy).sort((a, b) => b[1] - a[1]);
+  const maxPaid = paidRows.length ? paidRows[0][1] : 1;
+
+  const pair = {};
+  DB.ledger.forEach(l => {
+    const owe = num(l.expectedReceivableTwd) - num(l.receivedTwd);
+    if (owe <= 0 || !l.counterparty || !l.payer || l.counterparty === l.payer) return;
+    const k = l.counterparty + '|' + l.payer;
+    pair[k] = pair[k] || { from: l.counterparty, to: l.payer, amt: 0, items: [] };
+    pair[k].amt += owe;
+    pair[k].items.push(l);
+  });
+  const done = {}, nets = [];
+  Object.keys(pair).forEach(k => {
+    const p = pair[k];
+    const rk = p.to + '|' + p.from;
+    if (done[k] || done[rk]) return;
+    const rev = pair[rk];
+    const net = p.amt - (rev ? rev.amt : 0);
+    nets.push({
+      from: net >= 0 ? p.from : p.to,
+      to: net >= 0 ? p.to : p.from,
+      amt: Math.abs(net),
+      items: p.items.concat(rev ? rev.items : []),
+    });
+    done[k] = done[rk] = true;
+  });
+
+  let html = '';
+  if (paidRows.length) {
+    html += `<div class="card"><div class="chart-title">誰付了多少<span class="mini">全部支出依付款人加總</span></div>` +
+      paidRows.map(([p, amt]) => `<div class="bar-row">
+        <span class="bl">${esc(p)}</span>
+        <span class="track"><i style="width:${Math.max(4, Math.round(amt / maxPaid * 100))}%"></i></span>
+        <span class="bv">${fmtInt(amt)}</span>
+      </div>`).join('') + '</div>';
+  }
+  html += '<div class="form-section">互相應給</div>';
+  if (!nets.length) html += emptyHtml('目前沒有未結清的分帳');
+  html += nets.map((n, i) => {
+    const open = state.openGroups['s:' + i] ? ' open' : '';
+    const body = n.items.map(ledgerRowHtml).join('');
+    return `<div class="group${open}" data-group="s:${i}">
+      <button class="group-head">
+        <span class="row-title">${esc(n.from)} <span style="color:var(--muted)">應給</span> ${esc(n.to)}</span>
+        <span style="display:flex;align-items:center;gap:8px"><span class="amount danger">${fmtInt(n.amt)}</span><span class="caret">›</span></span>
+      </button>
+      <div class="group-body">${body}</div>
+    </div>`;
+  }).join('');
+  return html;
+}
 function renderLedger(view) {
+  if (state.lgSeg === 'split') {
+    view.innerHTML = `<div class="seg">
+      <button data-lgseg="flow">流水</button>
+      <button data-lgseg="split" class="on">分帳</button>
+    </div>` + splitHtml();
+    $$('[data-lgseg]', view).forEach(b => b.onclick = () => { state.lgSeg = b.dataset.lgseg; state.openGroups = {}; render(); });
+    bindGroups(view);
+    $$('[data-ledger]', view).forEach(el => el.onclick = e => {
+      e.stopPropagation();
+      const l = DB.ledger.find(x => x.id === el.dataset.ledger);
+      if (l) openLedgerForm(l);
+    });
+    return;
+  }
   const catOpts = [['', '全部分類']].concat(Object.entries(CAT_LABEL));
   const setOpts = [['', '全部狀態'], ['settled', '已結清'], ['partial', '部分結清'], ['unsettled', '未結清']];
   const q = state.search.trim();
@@ -995,7 +1061,6 @@ function renderLedger(view) {
     ? !['ticket', 'transport', 'lodging'].includes(l.category)
     : l.category === state.cat);
 
-  const incomes = entries.filter(l => l.type === 'income');
   const expenses = entries.filter(l => l.type !== 'income');
   const groups = {};
   expenses.forEach(l => { (groups[l.eventId || ''] = groups[l.eventId || ''] || []).push(l); });
@@ -1007,10 +1072,13 @@ function renderLedger(view) {
   groupList.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 
   const totalSpend = expenses.reduce((s, l) => s + num(l.amountTwd), 0);
-  const totalIncome = incomes.reduce((s, l) => s + num(l.amountTwd), 0);
   const unreceived = DB.ledger.reduce((s, l) => s + Math.max(0, num(l.expectedReceivableTwd) - num(l.receivedTwd)), 0);
 
-  let html = `<div class="searchbar">
+  let html = `<div class="seg">
+    <button data-lgseg="flow" class="on">流水</button>
+    <button data-lgseg="split">分帳</button>
+  </div>
+  <div class="searchbar">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     <input id="lg-search" placeholder="搜尋標題、活動、對象…" value="${esc(state.search)}">
   </div>
@@ -1020,19 +1088,11 @@ function renderLedger(view) {
   </div>
   <div class="stat-strip">
     <div class="stat"><div class="n">${fmtInt(totalSpend)}</div><div class="l">支出 TWD</div></div>
-    <div class="stat"><div class="n">${fmtInt(totalIncome)}</div><div class="l">收入 TWD</div></div>
     <div class="stat"><div class="n">${fmtInt(unreceived)}</div><div class="l">未收 TWD</div></div>
+    <div class="stat"><div class="n">${fmtInt(expenses.length)}</div><div class="l">流水筆數</div></div>
   </div>`;
 
-  if (incomes.length && !state.settle) {
-    const body = incomes.map(ledgerRowHtml).join('');
-    const open = state.openGroups['g:income'] ? ' open' : '';
-    html += `<div class="group${open}" data-group="g:income">
-      <button class="group-head"><span class="row-title">收入</span>
-        <span style="display:flex;align-items:center;gap:8px"><span class="amount ok">+${fmtInt(totalIncome)}</span><span class="caret">›</span></span>
-      </button><div class="group-body">${body}</div></div>`;
-  }
-  if (!groupList.length && !incomes.length) html += emptyHtml('沒有符合的紀錄');
+  if (!groupList.length) html += emptyHtml('沒有符合的紀錄');
   html += groupList.map(g => {
     const sum = g.entries.reduce((s, l) => s + num(l.amountTwd), 0);
     const name = g.ev ? g.ev.name : '未指定活動';
@@ -1050,6 +1110,7 @@ function renderLedger(view) {
   }).join('');
   view.innerHTML = html;
 
+  $$('[data-lgseg]', view).forEach(b => b.onclick = () => { state.lgSeg = b.dataset.lgseg; state.openGroups = {}; render(); });
   const si = $('#lg-search');
   si.oninput = () => { state.search = si.value; render(); const el = $('#lg-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
   $('#lg-cat', view).onchange = e => { state.cat = e.target.value; render(); };
@@ -1499,7 +1560,7 @@ function openEventForm(existing) {
       saveEvent(ev);
       openLedgerForm(null, {
         category: b.dataset.addCat, eventId: ev.id, date: ev.startDate,
-        title: ev.name + '｜' + CAT_LABEL[b.dataset.addCat], payer: ev.payer,
+        title: CAT_LABEL[b.dataset.addCat] + ' - ' + ev.name, payer: ev.payer,
       }, ev.id);
     });
     $$('[data-rel-ledger]').forEach(el => el.onclick = () => {
@@ -1532,16 +1593,12 @@ function openLedgerForm(existing, preset, backEventId) {
 
   const html = `
   ${sheetTitleHtml(isNew ? '新增流水' : '編輯流水', !isNew, 'ledger-del', !!backEventId)}
-  <div class="seg" id="l-type">
-    <button data-type="expense" class="${l.type !== 'income' ? 'on' : ''}">支出</button>
-    <button data-type="income" class="${l.type === 'income' ? 'on' : ''}">收入</button>
-  </div>
   <div class="field-row">
     ${fieldHtml('分類', selectHtml('l-category', catOpts, l.category))}
     ${fieldHtml('日期', `<input id="l-date" type="date" value="${esc(l.date)}">`)}
   </div>
   ${fieldHtml('標題', `<input id="l-title" value="${esc(l.title)}">`)}
-  <div class="field" id="l-event-wrap" style="${l.type === 'income' ? 'display:none' : ''}">
+  <div class="field" id="l-event-wrap">
     <label>活動場次</label>${selectHtml('l-eventId', evOpts, l.eventId)}
   </div>
   ${fieldHtml('金額（台幣）', `<input id="l-amountTwd" type="number" inputmode="numeric" value="${esc(l.amountTwd)}">`)}
@@ -1559,7 +1616,8 @@ function openLedgerForm(existing, preset, backEventId) {
   <label class="check-row">已結清 <input type="checkbox" id="l-settled" ${settledChecked ? 'checked' : ''}></label>
 
   <div class="form-section">分帳</div>
-  ${fieldHtml('對象', `<input id="l-counterparty" value="${esc(l.counterparty)}">`)}
+  ${fieldHtml('對象（可下拉選擇或直接輸入新名字）', `<input id="l-counterparty" list="dl-cp" value="${esc(l.counterparty)}">`)}
+  <datalist id="dl-cp">${datalistOptions(DB.ledger.flatMap(x => [x.counterparty, x.payer]).concat(DB.orders.map(x => x.payer)))}</datalist>
   <div class="field-row">
     ${fieldHtml('應結金額', `<input id="l-expectedReceivableTwd" type="number" inputmode="numeric" value="${esc(l.expectedReceivableTwd)}">`)}
     ${fieldHtml('已結金額', `<input id="l-receivedTwd" type="number" inputmode="numeric" value="${esc(l.receivedTwd)}">`)}
@@ -1602,11 +1660,6 @@ function openLedgerForm(existing, preset, backEventId) {
   };
   if (backEventId) $('#sh-back').onclick = goBack;
 
-  $$('#l-type button').forEach(b => b.onclick = () => {
-    l.type = b.dataset.type;
-    $$('#l-type button').forEach(x => x.classList.toggle('on', x === b));
-    $('#l-event-wrap').style.display = l.type === 'income' ? 'none' : '';
-  });
   $('#l-category').onchange = () => {
     $('#ticket-wrap').style.display = $('#l-category').value === 'ticket' ? '' : 'none';
   };
@@ -1619,7 +1672,8 @@ function openLedgerForm(existing, preset, backEventId) {
   $('#ledger-save').onclick = () => {
     ['date', 'title', 'payer', 'paymentDetail', 'counterparty', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
     l.category = $('#l-category').value;
-    l.eventId = l.type === 'income' ? '' : $('#l-eventId').value;
+    l.type = 'expense';
+    l.eventId = $('#l-eventId').value;
     l.paymentMethod = $('#l-paymentMethod').value;
     l.currency = $('#l-currency').value;
     l.settled = $('#l-settled').checked;
@@ -1643,6 +1697,25 @@ function openLedgerForm(existing, preset, backEventId) {
   }
 }
 
+/* ---------- 舊格式標題整理 ---------- */
+// 早期範本產生的「活動名稱｜分類」改成「分類 - 活動名稱」；自訂標題不動
+function migrateTitles() {
+  const changed = [];
+  DB.ledger.forEach(l => {
+    const ev = l.eventId && DB.events.find(e => e.id === l.eventId);
+    const cat = CAT_LABEL[l.category];
+    if (!ev || !cat) return;
+    if (l.title === ev.name + '｜' + cat) {
+      l.title = cat + ' - ' + ev.name;
+      changed.push(l);
+    }
+  });
+  if (changed.length) {
+    saveDB();
+    pushOps([{ action: 'upsert', table: 'ledger', rows: changed }]);
+  }
+}
+
 /* ---------- 啟動 ---------- */
 $$('#tabbar button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
 $('#fab').onclick = () => {
@@ -1652,5 +1725,6 @@ $('#fab').onclick = () => {
 };
 $('#sync-btn').onclick = () => doSync(false);
 applyTheme();
+migrateTitles();
 render();
 if (CFG.apiUrl && !isDirty()) doSync(true);

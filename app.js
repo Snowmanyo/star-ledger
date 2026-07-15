@@ -33,7 +33,7 @@ const CURRENCIES = ['KRW', 'JPY', 'USD', 'TWD'];
 const OWN_LABEL = { self: '自留', proxy: '代購', stock: '現貨', pending: '待補' };
 const PAY_LABEL = { cash: '現金', credit_card: '信用卡', bank_transfer: '轉帳', mobile_payment: '行動支付', '': '—' };
 const CAT_LABEL = { ticket: '票券', transport: '交通', lodging: '住宿', food: '餐飲', merch: '周邊', other: '其他' };
-const TAB_TITLE = { orders: '訂單', sales: '販售', events: '活動', ledger: '總帳', settings: '設定' };
+const TAB_TITLE = { home: '首頁', orders: '訂單', events: '活動', ledger: '總帳', settings: '設定' };
 const ICONS = {
   copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
   trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 7V5h4v2M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -61,7 +61,7 @@ const NUMF = {
   items: ['unitPrice', 'quantity', 'salePriceTwd', 'soldQuantity'],
   sales: ['unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity'],
   events: ['ticketPriceTwd'],
-  ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd'],
+  ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd'],
 };
 const BOOLF = {
   orders: ['settled'],
@@ -441,7 +441,11 @@ const settleBadge = s => s === 'settled' ? '<span class="badge ok">已結清</sp
   : s === 'unsettled' ? '<span class="badge danger">未結清</span>' : '';
 
 /* ---------- 畫面 ---------- */
-const state = { tab: 'orders', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {}, oSearch: '', oChannel: '', oPayer: '', oStatus: '', evSeg: 'list', statYear: '' };
+const state = { tab: 'home', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {}, oSearch: '', oChannel: '', oPayer: '', oStatus: '', evSeg: 'list', statYear: '' };
+const savedUi = JSON.parse(localStorage.getItem('sl-ui') || '{}');
+if (TAB_TITLE[savedUi.tab]) state.tab = savedUi.tab;
+if (savedUi.seg) state.seg = savedUi.seg;
+if (savedUi.evSeg) state.evSeg = savedUi.evSeg;
 
 function setTab(tab) {
   state.tab = tab;
@@ -451,12 +455,13 @@ function setTab(tab) {
 function render(scrollTop) {
   $('#page-title').textContent = TAB_TITLE[state.tab];
   $$('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
-  $('#fab').classList.toggle('hide', state.tab === 'sales' || state.tab === 'settings');
+  $('#fab').classList.toggle('hide', state.tab === 'home' || state.tab === 'settings' || (state.tab === 'orders' && state.seg === 'sales'));
+  localStorage.setItem('sl-ui', JSON.stringify({ tab: state.tab, seg: state.seg, evSeg: state.evSeg }));
   const view = $('#view');
   const chipsPos = $$('.chips', view).map(c => c.scrollLeft);
   const y = window.scrollY;
-  if (state.tab === 'orders') renderOrdersTab(view);
-  else if (state.tab === 'sales') renderSales(view);
+  if (state.tab === 'home') renderHome(view);
+  else if (state.tab === 'orders') renderOrdersTab(view);
   else if (state.tab === 'events') renderEvents(view);
   else if (state.tab === 'ledger') renderLedger(view);
   else renderSettings(view);
@@ -469,17 +474,83 @@ function render(scrollTop) {
 
 /* ----- 訂單頁（含待到貨、代購） ----- */
 function renderOrdersTab(view) {
-  const segs = [['list', '訂單'], ['arrivals', '待到貨'], ['proxy', '代購對象']];
+  const segs = [['list', '訂單'], ['arrivals', '待到貨'], ['proxy', '代購'], ['sales', '販售']];
   let html = '<div class="seg">' + segs.map(([k, l]) =>
     `<button data-seg="${k}" class="${state.seg === k ? 'on' : ''}">${l}</button>`).join('') + '</div>';
   if (state.seg === 'list') html += ordersListHtml();
   else if (state.seg === 'arrivals') html += arrivalsHtml();
+  else if (state.seg === 'sales') html += salesHtml();
   else html += proxyHtml();
   view.innerHTML = html;
   $$('[data-seg]', view).forEach(b => b.onclick = () => { state.seg = b.dataset.seg; state.openGroups = {}; render(); });
   if (state.seg === 'list') bindOrdersList(view);
   else if (state.seg === 'arrivals') bindArrivals(view);
+  else if (state.seg === 'sales') bindSales(view);
   else bindProxy(view);
+}
+
+/* ----- 首頁 ----- */
+function renderHome(view) {
+  const t = today();
+  const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
+  const now = new Date();
+  const dateLine = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日 · 星期${weekdays[now.getDay()]}`;
+  const upcoming = DB.events.filter(e => String(e.startDate || '') >= t)
+    .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate))).slice(0, 5);
+  let pendingQty = 0, proxyUnpaid = 0;
+  DB.orders.forEach(o => (o.items || []).forEach(it => {
+    if (!it.arrived) pendingQty += num(it.quantity);
+    if (it.ownership === 'proxy' && !it.proxyPaid) proxyUnpaid += computeUnitCostTwd(o, it) * num(it.quantity);
+  }));
+  const unsettled = DB.events.filter(e => !e.settled).length;
+  const daysTo = d => Math.ceil((new Date(d) - now) / 86400000);
+
+  const todoCard = (key, label, value, cls) => `<button class="group-head" style="margin-bottom:10px" data-goto="${key}">
+      <span class="row-title">${label}</span>
+      <span style="display:flex;align-items:center;gap:8px"><span class="badge ${cls}">${value}</span><span class="caret">›</span></span>
+    </button>`;
+  let todos = '';
+  if (pendingQty) todos += todoCard('arrivals', '待到貨', fmtInt(pendingQty) + ' 件', 'warn');
+  if (proxyUnpaid) todos += todoCard('proxy', '代購未收', fmtTwd(proxyUnpaid), 'danger');
+  if (unsettled) todos += todoCard('unsettled', '未結清場次', fmtInt(unsettled) + ' 場', 'danger');
+  if (isDirty()) todos += todoCard('settings', '有變更尚未上傳', '前往設定', 'accent');
+
+  view.innerHTML = `
+  <div class="section-note" style="letter-spacing:.1em">${dateLine}</div>
+  <div class="stat-strip">
+    <button class="stat" data-quick="order"><div class="n">＋</div><div class="l">新增訂單</div></button>
+    <button class="stat" data-quick="event"><div class="n">＋</div><div class="l">新增活動</div></button>
+    <button class="stat" data-quick="ledger"><div class="n">＋</div><div class="l">新增流水</div></button>
+  </div>
+  ${todos ? `<div class="form-section" style="margin-top:18px">待辦提醒</div>${todos}` : ''}
+  <div class="form-section" style="margin-top:18px">即將到來的活動</div>
+  ${upcoming.length ? upcoming.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
+    <div class="row-head">
+      <div class="row-title">${esc(e.name)}</div>
+      <span class="badge accent">${daysTo(e.startDate) === 0 ? '今天' : daysTo(e.startDate) + ' 天後'}</span>
+    </div>
+    <div class="row-meta">
+      <span>${esc(e.startDate)}</span>
+      ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
+      ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
+    </div>
+  </div>`).join('') : emptyHtml('近期沒有安排活動')}`;
+
+  $$('[data-quick]', view).forEach(b => b.onclick = () => {
+    if (b.dataset.quick === 'order') openOrderForm(null);
+    else if (b.dataset.quick === 'event') openEventForm(null);
+    else openLedgerForm(null);
+  });
+  $$('[data-goto]', view).forEach(b => b.onclick = () => {
+    const k = b.dataset.goto;
+    if (k === 'arrivals' || k === 'proxy') { state.seg = k; setTab('orders'); }
+    else if (k === 'unsettled') { state.settle = 'unsettled'; setTab('ledger'); }
+    else setTab('settings');
+  });
+  $$('[data-event]', view).forEach(el => el.onclick = () => {
+    const ev = DB.events.find(x => x.id === el.dataset.event);
+    if (ev) openEventForm(ev);
+  });
 }
 
 function orderSeqMap() {
@@ -693,8 +764,8 @@ function bindGroups(view) {
 }
 
 /* ----- 販售 ----- */
-function renderSales(view) {
-  if (!DB.sales.length) { view.innerHTML = emptyHtml('還沒有現貨販售，把訂單品項歸屬設成「現貨」就會自動出現'); return; }
+function salesHtml() {
+  if (!DB.sales.length) return emptyHtml('還沒有現貨販售，把訂單品項歸屬設成「現貨」就會自動出現');
   const totalCost = DB.sales.reduce((s, x) => s + num(x.unitCostTwd) * num(x.quantity), 0);
   const soldIncome = DB.sales.reduce((s, x) => s + num(x.salePriceTwd) * num(x.soldQuantity), 0);
   const soldQty = DB.sales.reduce((s, x) => s + num(x.soldQuantity), 0);
@@ -704,42 +775,53 @@ function renderSales(view) {
     <div class="stat"><div class="n">${fmtInt(soldIncome)}</div><div class="l">已售收入 TWD</div></div>
   </div>
   <div class="section-note" style="display:flex;justify-content:space-between;align-items:center">
-    <span>已售出 ${fmtInt(soldQty)} 件</span>
+    <span>已售出 ${fmtInt(soldQty)} 件｜售價輸入完離開欄位就會儲存</span>
     <button class="btn line small" id="recalc-btn">重算成本</button>
   </div>`;
   html += DB.sales.map(s => {
     const sold = num(s.soldQuantity), qty = num(s.quantity);
     const profit = num(s.salePriceTwd) ? (num(s.salePriceTwd) - num(s.unitCostTwd)) * sold : 0;
     return `<div class="card">
-      <div class="row-head">
-        <div class="row-title">${esc(s.name)}${s.variant ? `<span class="sub">${esc(s.variant)}</span>` : ''}</div>
-        <span class="badge ${sold >= qty && qty ? 'ok' : ''}">${fmtInt(sold)} / ${fmtInt(qty)}</span>
-      </div>
-      <div class="row-meta">
-        <span>${esc(s.sourceChannel)}</span>
-        <span>原價 ${esc(fmtMoney(s.sourceCurrency, s.unitOriginalPrice))}</span>
-        <span>成本 ${s.unitCostTwd ? fmtTwd(s.unitCostTwd) : '待算'}</span>
-        ${profit ? `<span class="amount ${profit > 0 ? 'ok' : 'danger'}" style="font-size:12px">毛利 ${fmtInt(profit)}</span>` : ''}
+      <div class="tappable" data-open-order="${esc(s.sourceOrderId)}" style="margin:-14px -16px 0;padding:14px 16px 2px;border-radius:16px 16px 0 0">
+        <div class="row-head">
+          <div class="row-title">${esc(s.name)}${s.variant ? `<span class="sub">${esc(s.variant)}</span>` : ''}</div>
+          <span class="badge ${sold >= qty && qty ? 'ok' : ''}">已售 ${fmtInt(sold)} / ${fmtInt(qty)}</span>
+        </div>
+        <div class="row-meta">
+          <span>${esc(s.sourceChannel)}${s.sourceOrderNumber ? ' ' + esc(s.sourceOrderNumber) : ''} ›</span>
+          <span>原價 ${esc(fmtMoney(s.sourceCurrency, s.unitOriginalPrice))}</span>
+          <span>成本 ${s.unitCostTwd ? fmtTwd(s.unitCostTwd) : '待算'}</span>
+          ${profit ? `<span class="amount ${profit > 0 ? 'ok' : 'danger'}" style="font-size:12px">毛利 ${fmtInt(profit)}</span>` : ''}
+        </div>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:12px">
         <div style="flex:1;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)">
           售價<input type="number" inputmode="numeric" style="width:90px;padding:5px 8px" value="${esc(num(s.salePriceTwd) || '')}" data-price="${esc(s.id)}" placeholder="TWD">
         </div>
-        <div class="qty-step">
-          <button data-sold="${esc(s.id)}" data-d="-1">−</button>
-          <span class="q">${fmtInt(sold)}</span>
-          <button data-sold="${esc(s.id)}" data-d="1">＋</button>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)">已售
+          <div class="qty-step">
+            <button data-sold="${esc(s.id)}" data-d="-1">−</button>
+            <span class="q">${fmtInt(sold)}</span>
+            <button data-sold="${esc(s.id)}" data-d="1">＋</button>
+          </div>
         </div>
       </div>
     </div>`;
   }).join('');
-  view.innerHTML = html;
-  $('#recalc-btn').onclick = recalcAllCosts;
+  return html;
+}
+function bindSales(view) {
+  $('#recalc-btn') && ($('#recalc-btn').onclick = recalcAllCosts);
+  $$('[data-open-order]', view).forEach(el => el.onclick = () => {
+    const o = DB.orders.find(x => x.id === el.dataset.openOrder);
+    if (o) openOrderForm(o); else toast('找不到來源訂單');
+  });
   $$('[data-price]', view).forEach(inp => inp.onchange = () => {
     const s = DB.sales.find(x => x.id === inp.dataset.price);
     s.salePriceTwd = inp.value === '' ? '' : num(inp.value);
     saveSale(s);
     render();
+    toast('售價已儲存');
   });
   $$('[data-sold]', view).forEach(btn => btn.onclick = () => {
     const s = DB.sales.find(x => x.id === btn.dataset.sold);
@@ -1434,7 +1516,8 @@ function openLedgerForm(existing, preset, backEventId) {
     id: uid(), type: 'expense', category: 'ticket', date: today(), title: '', eventId: '',
     amountTwd: '', currency: '', originalAmount: '', exchangeRate: '', payer: '', paymentMethod: '',
     paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: false, notes: '',
-    ticketType: '', ticketArea: '', ticketRow: '', ticketSeat: '', attendee: '', ticketStatus: '', createdAt: today(),
+    ticketType: '', ticketArea: '', ticketRow: '', ticketSeat: '', attendee: '', ticketStatus: '',
+    ticketFaceTwd: '', ticketBenefitTwd: '', ticketFeeTwd: '', ticketPlatform: '', ticketAccount: '', createdAt: today(),
   }, preset || {});
   const settledChecked = (l.settled === undefined || l.settled === null || l.settled === '')
     ? !!(DB.events.find(e => e.id === l.eventId) || {}).settled
@@ -1485,6 +1568,17 @@ function openLedgerForm(existing, preset, backEventId) {
   <div id="ticket-wrap" style="${l.category === 'ticket' ? '' : 'display:none'}">
     <div class="form-section">票券資訊</div>
     <div class="field-row">
+      ${fieldHtml('票面金額', `<input id="l-ticketFaceTwd" type="number" inputmode="numeric" value="${esc(l.ticketFaceTwd)}">`)}
+      ${fieldHtml('福利金額', `<input id="l-ticketBenefitTwd" type="number" inputmode="numeric" value="${esc(l.ticketBenefitTwd)}">`)}
+      ${fieldHtml('手續費', `<input id="l-ticketFeeTwd" type="number" inputmode="numeric" value="${esc(l.ticketFeeTwd)}">`)}
+    </div>
+    <div class="hint">總價＝票面＋福利＋手續費，輸入後會自動帶入上方「金額（台幣）」</div>
+    <div class="field-row">
+      ${fieldHtml('購票平台', `<input id="l-ticketPlatform" list="dl-tplatform" placeholder="例：拓元、KKTIX" value="${esc(l.ticketPlatform)}">`)}
+      ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
+    </div>
+    <datalist id="dl-tplatform">${datalistOptions(DB.ledger.map(x => x.ticketPlatform))}</datalist>
+    <div class="field-row">
       ${fieldHtml('票種', `<input id="l-ticketType" placeholder="例：全席指定" value="${esc(l.ticketType)}">`)}
       ${fieldHtml('入場人', `<input id="l-attendee" value="${esc(l.attendee)}">`)}
     </div>
@@ -1516,14 +1610,20 @@ function openLedgerForm(existing, preset, backEventId) {
   $('#l-category').onchange = () => {
     $('#ticket-wrap').style.display = $('#l-category').value === 'ticket' ? '' : 'none';
   };
+  ['l-ticketFaceTwd', 'l-ticketBenefitTwd', 'l-ticketFeeTwd'].forEach(id => {
+    $('#' + id).oninput = () => {
+      const total = num($('#l-ticketFaceTwd').value) + num($('#l-ticketBenefitTwd').value) + num($('#l-ticketFeeTwd').value);
+      if (total) $('#l-amountTwd').value = total;
+    };
+  });
   $('#ledger-save').onclick = () => {
-    ['date', 'title', 'payer', 'paymentDetail', 'counterparty', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    ['date', 'title', 'payer', 'paymentDetail', 'counterparty', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
     l.category = $('#l-category').value;
     l.eventId = l.type === 'income' ? '' : $('#l-eventId').value;
     l.paymentMethod = $('#l-paymentMethod').value;
     l.currency = $('#l-currency').value;
     l.settled = $('#l-settled').checked;
-    ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd'].forEach(k => {
+    ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd'].forEach(k => {
       const v = $('#l-' + k).value;
       l[k] = v === '' ? '' : num(v);
     });

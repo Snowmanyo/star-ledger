@@ -52,10 +52,34 @@ function sheetTitleHtml(title, withDelete, delId, withBack) {
   </span></div>`;
 }
 const splitList = l => Array.isArray(l.splits) ? l.splits : [];
+function peopleList() {
+  const set = new Set();
+  if (CFG.myName) set.add(CFG.myName);
+  String(CFG.people || '').split(/[,，、\s]+/).filter(Boolean).forEach(p => set.add(p));
+  DB.ledger.forEach(l => {
+    if (l.payer) set.add(l.payer);
+    if (l.counterparty) set.add(l.counterparty);
+    splitList(l).forEach(s => { if (s.name) set.add(s.name); });
+  });
+  DB.orders.forEach(o => { if (o.payer) set.add(o.payer); });
+  return [...set];
+}
 const splitTotal = l => {
   const sp = splitList(l);
   return sp.length ? sp.reduce((s, x) => s + num(x.amountTwd), 0) : num(l.expectedReceivableTwd);
 };
+// 我的份：名單有「我」就用我的列；沒設定我的名字時退回付款人視角（總額扣掉別人）
+function ownShare(l) {
+  const sp = splitList(l);
+  if (sp.length) {
+    if (CFG.myName && sp.some(s => s.name === CFG.myName)) {
+      return sp.filter(s => s.name === CFG.myName).reduce((s, x) => s + num(x.amountTwd), 0);
+    }
+    if (CFG.myName && l.payer && l.payer !== CFG.myName) return 0;
+    return Math.max(0, num(l.amountTwd) - sp.filter(s => s.name !== l.payer).reduce((s, x) => s + num(x.amountTwd), 0));
+  }
+  return Math.max(0, num(l.amountTwd) - num(l.expectedReceivableTwd));
+}
 const ledgerOut = rows => rows.map(r => Object.assign({}, r, { splits: JSON.stringify(splitList(r)) }));
 function eventTitle(e) {
   return (e.eventType === '拼盤' || !e.artist || String(e.name).includes(e.artist))
@@ -82,7 +106,7 @@ const BOOLF = {
 };
 
 /* ---------- 設定與快取 ---------- */
-let CFG = Object.assign({ theme: 'milktea', apiUrl: '', key: '', sheetUrl: '', lastSync: '' },
+let CFG = Object.assign({ theme: 'milktea', apiUrl: '', key: '', sheetUrl: '', lastSync: '', myName: '', people: '' },
   JSON.parse(localStorage.getItem('sl-config') || '{}'));
 const saveCfg = () => localStorage.setItem('sl-config', JSON.stringify(CFG));
 
@@ -404,7 +428,7 @@ function syncEventFromTickets(eventId) {
   if (!ev) return null;
   const tickets = DB.ledger.filter(l => l.eventId === eventId && l.category === 'ticket');
   if (!tickets.length) return null;
-  ev.ticketPriceTwd = tickets.reduce((s, l) => s + Math.max(0, num(l.amountTwd) - splitTotal(l)), 0);
+  ev.ticketPriceTwd = tickets.reduce((s, l) => s + ownShare(l), 0);
   const seats = tickets.map(seatText).filter(Boolean);
   if (seats.length) ev.seat = seats.join(' ');
   return ev;
@@ -433,7 +457,7 @@ function deleteLedger(entry) {
 
 /* ---------- 總帳彙整 ---------- */
 function entrySettle(l) {
-  const sp = splitList(l);
+  const sp = splitList(l).filter(s => s.name !== l.payer);
   if (sp.length) {
     const done = sp.filter(s => s.settled).length;
     return done === sp.length ? 'settled' : done ? 'partial' : 'unsettled';
@@ -1156,8 +1180,8 @@ function ledgerRowHtml(l) {
         ${l.payer ? `<span>付款 ${esc(l.payer)}</span>` : ''}
         ${seat ? `<span>${esc(seat)}</span>` : ''}
         ${l.attendee ? `<span>${esc(l.attendee)}</span>` : ''}
-        ${splitList(l).length
-          ? `<span>${splitList(l).map(s => esc(s.name) + ' ' + fmtInt(s.amountTwd) + (s.settled ? '（已付）' : '（未付）')).join('、')}</span>`
+        ${splitList(l).filter(s => s.name !== l.payer).length
+          ? `<span>應給 ${esc(l.payer)}：${splitList(l).filter(s => s.name !== l.payer).map(s => esc(CFG.myName && s.name === CFG.myName ? '我' : s.name) + ' ' + fmtInt(s.amountTwd) + (s.settled ? '（已付）' : '（未付）')).join('、')}</span>`
           : (num(l.expectedReceivableTwd) ? `<span>應結 ${fmtInt(l.expectedReceivableTwd)}／已結 ${fmtInt(l.receivedTwd)}${l.counterparty ? '（' + esc(l.counterparty) + '）' : ''}</span>` : '')}
       </div>
     </div>
@@ -1175,6 +1199,10 @@ function renderSettings(view) {
   view.innerHTML = `
   <div class="form-section" style="margin-top:6px">主題色</div>
   <div class="swatches">${swatches}</div>
+
+  <div class="form-section">個人</div>
+  <div class="field"><label>我的名字（分帳時用來認出哪一份是你的）</label><input id="cfg-myname" placeholder="例：Chi" value="${esc(CFG.myName)}"></div>
+  <div class="field"><label>常用名單（用逗號分隔，會出現在人名下拉）</label><input id="cfg-people" placeholder="例：Jhen, Joanne" value="${esc(CFG.people)}"></div>
 
   <div class="form-section">雲端同步</div>
   <div class="field"><label>APPS SCRIPT 網址</label><input id="cfg-api" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(CFG.apiUrl)}"></div>
@@ -1206,6 +1234,8 @@ function renderSettings(view) {
     render();
   });
   $('#cfg-save').onclick = async () => {
+    CFG.myName = $('#cfg-myname').value.trim();
+    CFG.people = $('#cfg-people').value.trim();
     CFG.apiUrl = $('#cfg-api').value.trim();
     CFG.key = $('#cfg-key').value.trim();
     CFG.sheetUrl = $('#cfg-sheet').value.trim();
@@ -1643,13 +1673,14 @@ function openLedgerForm(existing, preset, backEventId) {
   const isNew = !existing;
   const l = existing ? JSON.parse(JSON.stringify(existing)) : Object.assign({
     id: uid(), type: 'expense', category: 'ticket', date: today(), title: '', eventId: '',
-    amountTwd: '', currency: '', originalAmount: '', exchangeRate: '', payer: '', paymentMethod: '',
+    amountTwd: '', currency: '', originalAmount: '', exchangeRate: '', payer: CFG.myName || '', paymentMethod: '',
     paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '', notes: '',
     ticketType: '', ticketArea: '', ticketRow: '', ticketSeat: '', attendee: '', ticketStatus: '',
     ticketFaceTwd: '', ticketBenefitTwd: '', ticketFeeTwd: '', ticketPlatform: '', ticketAccount: '',
     ticketCount: 1, splits: [], createdAt: today(),
   }, preset || {});
   if (!Array.isArray(l.splits)) l.splits = [];
+  if (isNew && !l.splits.length) l.splits.push({ name: CFG.myName || '', count: 1, amountTwd: '', settled: false });
 
   const evOpts = [['', '不指定活動']].concat(
     DB.events.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)))
@@ -1657,15 +1688,27 @@ function openLedgerForm(existing, preset, backEventId) {
   const catOpts = Object.entries(CAT_LABEL);
   const payOpts = [['', '—'], ['cash', '現金'], ['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付']];
   const curOpts = [['', '—']].concat(CURRENCIES.map(c => [c, c]));
+  const fxOpen = !!(l.currency || num(l.originalAmount));
+
+  const catNow = () => ($('#l-category') ? $('#l-category').value : l.category);
+  const payerNow = () => ($('#l-payer') ? $('#l-payer').value.trim() : l.payer);
 
   function splitRow(s, i) {
-    return `<div class="item-block" data-split="${i}" style="padding-bottom:10px">
+    const ticket = catNow() === 'ticket';
+    const isMe = CFG.myName && s.name === CFG.myName;
+    const isPayer = s.name && s.name === payerNow();
+    return `<div class="item-block" data-split="${i}" style="padding:10px 12px 8px">
       <div style="display:flex;gap:8px;align-items:center">
-        <input data-sk="name" data-si="${i}" list="dl-cp" placeholder="人名" value="${esc(s.name)}" style="flex:1.2">
-        <input data-sk="amountTwd" data-si="${i}" type="number" inputmode="numeric" placeholder="應付金額" value="${esc(s.amountTwd)}" style="flex:1">
+        <input data-sk="name" data-si="${i}" list="dl-cp" placeholder="人名" value="${esc(s.name)}" style="flex:1.3">
+        ${ticket ? `<input data-sk="count" data-si="${i}" type="number" inputmode="numeric" placeholder="張" value="${esc(s.count == null ? '' : s.count)}" style="flex:.55">` : ''}
+        <input data-sk="amountTwd" data-si="${i}" type="number" inputmode="numeric" placeholder="金額" value="${esc(s.amountTwd)}" style="flex:1">
         <button class="icon-mini danger" data-del-split="${i}" aria-label="移除">${ICONS.trash}</button>
       </div>
-      <label class="check-row" style="margin-top:6px">對方已付款 <input type="checkbox" data-sk="settled" data-si="${i}" ${s.settled ? 'checked' : ''}></label>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;min-height:20px">
+        <span style="font-size:11px;color:var(--accent)">${isMe ? '我' : ''}${isPayer ? (isMe ? '（付款人）' : '付款人，不用還') : ''}</span>
+        <label class="check-row" style="padding:0;font-size:12px;color:var(--muted);${isPayer ? 'visibility:hidden' : ''}">已給款
+          <input type="checkbox" data-sk="settled" data-si="${i}" ${s.settled ? 'checked' : ''}></label>
+      </div>
     </div>`;
   }
 
@@ -1675,54 +1718,51 @@ function openLedgerForm(existing, preset, backEventId) {
     ${fieldHtml('分類', selectHtml('l-category', catOpts, l.category))}
     ${fieldHtml('日期', `<input id="l-date" type="date" value="${esc(l.date)}">`)}
   </div>
-  ${fieldHtml('標題', `<input id="l-title" value="${esc(l.title)}">`)}
   <div class="field" id="l-event-wrap">
     <label>活動場次</label>${selectHtml('l-eventId', evOpts, l.eventId)}
   </div>
+  ${fieldHtml('標題（選活動會自動產生，可改）', `<input id="l-title" value="${esc(l.title)}">`)}
 
   <div id="ticket-wrap" style="${l.category === 'ticket' ? '' : 'display:none'}">
     <div class="form-section">買了什麼票</div>
     <div class="field-row">
       ${fieldHtml('單張票面', `<input id="l-ticketFaceTwd" type="number" inputmode="numeric" value="${esc(l.ticketFaceTwd)}">`)}
       ${fieldHtml('單張福利', `<input id="l-ticketBenefitTwd" type="number" inputmode="numeric" value="${esc(l.ticketBenefitTwd)}">`)}
-      ${fieldHtml('張數', `<input id="l-ticketCount" type="number" inputmode="numeric" value="${esc(l.ticketCount || 1)}">`)}
+      ${fieldHtml('單張手續費', `<input id="l-ticketFeeTwd" type="number" inputmode="numeric" value="${esc(l.ticketFeeTwd)}">`)}
     </div>
-    ${fieldHtml('手續費（整筆訂單一次）', `<input id="l-ticketFeeTwd" type="number" inputmode="numeric" value="${esc(l.ticketFeeTwd)}">`)}
-    <div class="hint" id="tk-hint"></div>
     <div class="field-row">
+      ${fieldHtml('張數', `<input id="l-ticketCount" type="number" inputmode="numeric" value="${esc(l.ticketCount || 1)}">`)}
       ${fieldHtml('購票平台', `<input id="l-ticketPlatform" list="dl-tplatform" placeholder="例：拓元、KKTIX" value="${esc(l.ticketPlatform)}">`)}
-      ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
     </div>
     <datalist id="dl-tplatform">${datalistOptions(DB.ledger.map(x => x.ticketPlatform))}</datalist>
+    <div class="hint" id="tk-hint"></div>
+    ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
     <div class="field-row">
-      ${fieldHtml('票種', `<input id="l-ticketType" placeholder="例：全席指定" value="${esc(l.ticketType)}">`)}
-      ${fieldHtml('入場人', `<input id="l-attendee" value="${esc(l.attendee)}">`)}
-    </div>
-    <div class="field-row">
-      ${fieldHtml('區域', `<input id="l-ticketArea" value="${esc(l.ticketArea)}">`)}
+      ${fieldHtml('區域（自己的座位）', `<input id="l-ticketArea" value="${esc(l.ticketArea)}">`)}
       ${fieldHtml('排', `<input id="l-ticketRow" value="${esc(l.ticketRow)}">`)}
       ${fieldHtml('座號', `<input id="l-ticketSeat" value="${esc(l.ticketSeat)}">`)}
     </div>
-    ${fieldHtml('票券狀態', `<input id="l-ticketStatus" list="dl-tstatus" value="${esc(l.ticketStatus)}"><datalist id="dl-tstatus"><option value="已使用"><option value="未使用"><option value="轉讓"><option value="退票"></datalist>`)}
   </div>
 
-  <div class="form-section">我實際付了多少</div>
-  ${fieldHtml('總金額（台幣，我付的全額）', `<input id="l-amountTwd" type="number" inputmode="numeric" value="${esc(l.amountTwd)}">`)}
+  <div class="form-section">誰先付的錢</div>
   <div class="field-row">
+    ${fieldHtml('付款人（自己或朋友）', `<input id="l-payer" list="dl-cp" value="${esc(l.payer)}">`)}
+    ${fieldHtml('總金額（台幣）', `<input id="l-amountTwd" type="number" inputmode="numeric" value="${esc(l.amountTwd)}">`)}
+  </div>
+  <div class="field-row">
+    ${fieldHtml('付款方式', selectHtml('l-paymentMethod', payOpts, l.paymentMethod))}
+    ${fieldHtml('付款工具', `<input id="l-paymentDetail" placeholder="例：永豐、LINE Pay" value="${esc(l.paymentDetail)}">`)}
+  </div>
+  <label class="check-row">以外幣付款 <input type="checkbox" id="l-fx-toggle" ${fxOpen ? 'checked' : ''}></label>
+  <div id="fx-row" class="field-row" style="${fxOpen ? '' : 'display:none'}">
     ${fieldHtml('原幣', selectHtml('l-currency', curOpts, l.currency))}
     ${fieldHtml('原幣金額', `<input id="l-originalAmount" type="number" inputmode="decimal" value="${esc(l.originalAmount)}">`)}
     ${fieldHtml('匯率', `<input id="l-exchangeRate" type="number" step="any" inputmode="decimal" value="${esc(l.exchangeRate)}">`)}
   </div>
-  <div class="field-row">
-    ${fieldHtml('付款人', `<input id="l-payer" list="dl-payer3" value="${esc(l.payer)}">`)}
-    ${fieldHtml('付款方式', selectHtml('l-paymentMethod', payOpts, l.paymentMethod))}
-  </div>
-  <datalist id="dl-payer3">${datalistOptions(DB.ledger.map(x => x.payer).concat(DB.orders.map(x => x.payer)))}</datalist>
-  ${fieldHtml('付款工具', `<input id="l-paymentDetail" value="${esc(l.paymentDetail)}">`)}
 
-  <div class="form-section">有幫誰代墊 <button class="btn line small" id="add-split">＋ 加一個人</button></div>
-  <div class="hint">自己的份不用填；填了別人，這筆就會出現在「分帳」頁，對方給錢後勾「已付款」。</div>
-  <datalist id="dl-cp">${datalistOptions(DB.ledger.flatMap(x => [x.counterparty, x.payer].concat(splitList(x).map(s => s.name))).concat(DB.orders.map(x => x.payer)))}</datalist>
+  <div class="form-section">在場的人怎麼分 <button class="btn line small" id="add-split">＋ 加一個人</button></div>
+  <div class="hint">名單包含自己。付款人不用還錢；其他人給錢後勾「已給款」。只有自己一人＝單純個人花費。</div>
+  <datalist id="dl-cp">${datalistOptions(peopleList())}</datalist>
   <div id="splits-wrap">${l.splits.map(splitRow).join('')}</div>
   <div class="hint" id="own-hint"></div>
 
@@ -1739,70 +1779,104 @@ function openLedgerForm(existing, preset, backEventId) {
   };
   if (backEventId) $('#sh-back').onclick = goBack;
 
-  const perTicket = () => num($('#l-ticketFaceTwd').value) + num($('#l-ticketBenefitTwd').value);
+  const perTicket = () => num($('#l-ticketFaceTwd').value) + num($('#l-ticketBenefitTwd').value) + num($('#l-ticketFeeTwd').value);
   const tCount = () => Math.max(1, num($('#l-ticketCount').value) || 1);
+
   function readSplits() {
     $$('#splits-wrap [data-sk]').forEach(inp => {
       const s = l.splits[Number(inp.dataset.si)];
       if (!s) return;
-      if (inp.type === 'checkbox') s[inp.dataset.sk] = inp.checked;
-      else if (inp.dataset.sk === 'amountTwd') s.amountTwd = inp.value === '' ? '' : num(inp.value);
-      else s[inp.dataset.sk] = inp.value.trim();
+      const k = inp.dataset.sk;
+      if (inp.type === 'checkbox') s[k] = inp.checked;
+      else if (k === 'name') s.name = inp.value.trim();
+      else s[k] = inp.value === '' ? '' : num(inp.value);
     });
   }
-  function refreshHints() {
-    if ($('#l-category').value === 'ticket') {
-      const total = perTicket() * tCount() + num($('#l-ticketFeeTwd').value);
-      $('#tk-hint').textContent = total ? `總金額自動計算：(票面＋福利)×張數＋手續費 = ${fmtTwd(total)}` : '總金額＝(票面＋福利)×張數＋手續費，會自動帶入下方';
-    }
-    readSplits();
-    const others = l.splits.reduce((s, x) => s + num(x.amountTwd), 0);
-    const own = num($('#l-amountTwd').value) - others;
-    $('#own-hint').textContent = others ? `別人合計 ${fmtTwd(others)}，自己的份 ${fmtTwd(own)}` : '';
-  }
-  function rebindSplits() {
+  function renderSplits() {
+    $('#splits-wrap').innerHTML = l.splits.map(splitRow).join('');
     $$('#splits-wrap [data-del-split]').forEach(b => b.onclick = () => {
       readSplits();
       l.splits.splice(Number(b.dataset.delSplit), 1);
-      $('#splits-wrap').innerHTML = l.splits.map(splitRow).join('');
-      rebindSplits();
-      refreshHints();
+      renderSplits();
+      refresh();
     });
   }
-  rebindSplits();
-  refreshHints();
-  $('#sheet').oninput = refreshHints;
+  function refresh() {
+    readSplits();
+    if (catNow() === 'ticket') {
+      const unit = perTicket();
+      const total = unit * tCount();
+      if (unit) {
+        $('#l-amountTwd').value = total;
+        l.splits.forEach((s, i) => {
+          if (num(s.count)) {
+            s.amountTwd = unit * num(s.count);
+            const inp = $(`#splits-wrap [data-sk="amountTwd"][data-si="${i}"]`);
+            if (inp) inp.value = s.amountTwd;
+          }
+        });
+      }
+      $('#tk-hint').textContent = unit
+        ? `單張總價 ${fmtTwd(unit)}（票面＋福利＋手續費）｜總金額 ${fmtTwd(unit)} × ${tCount()} 張 = ${fmtTwd(total)}`
+        : '單張總價＝票面＋福利＋手續費；總金額會自動計算';
+      const splitCount = l.splits.reduce((s, x) => s + num(x.count), 0);
+      if (splitCount && splitCount !== tCount()) {
+        $('#tk-hint').textContent += `（⚠ 名單張數合計 ${splitCount}，與張數 ${tCount()} 不符）`;
+      }
+    }
+    const listSum = l.splits.reduce((s, x) => s + num(x.amountTwd), 0);
+    const total = num($('#l-amountTwd').value);
+    const mine = CFG.myName ? l.splits.filter(s => s.name === CFG.myName).reduce((s, x) => s + num(x.amountTwd), 0) : 0;
+    const parts = [];
+    if (CFG.myName) parts.push(`我的份 ${fmtTwd(mine)}`);
+    if (listSum) parts.push(`名單合計 ${fmtTwd(listSum)}${total && listSum !== total ? `（⚠ 與總金額 ${fmtTwd(total)} 不符）` : ''}`);
+    $('#own-hint').textContent = parts.join('｜');
+  }
+  renderSplits();
+  refresh();
+  $('#sheet').oninput = refresh;
 
   $('#add-split').onclick = () => {
     readSplits();
-    const suggest = $('#l-category').value === 'ticket'
-      ? Math.round(perTicket() + num($('#l-ticketFeeTwd').value) / tCount()) || ''
-      : '';
-    l.splits.push({ name: '', amountTwd: suggest, settled: false });
-    $('#splits-wrap').innerHTML = l.splits.map(splitRow).join('');
-    rebindSplits();
-    refreshHints();
+    const ticket = catNow() === 'ticket';
+    l.splits.push({ name: '', count: ticket ? 1 : '', amountTwd: ticket ? perTicket() || '' : '', settled: false });
+    renderSplits();
+    refresh();
   };
   $('#l-category').onchange = () => {
-    $('#ticket-wrap').style.display = $('#l-category').value === 'ticket' ? '' : 'none';
+    $('#ticket-wrap').style.display = catNow() === 'ticket' ? '' : 'none';
+    readSplits();
+    renderSplits();
+    refresh();
   };
-  ['l-ticketFaceTwd', 'l-ticketBenefitTwd', 'l-ticketFeeTwd', 'l-ticketCount'].forEach(id => {
-    $('#' + id).addEventListener('input', () => {
-      const total = perTicket() * tCount() + num($('#l-ticketFeeTwd').value);
-      if (total) $('#l-amountTwd').value = total;
-    });
-  });
+  $('#l-payer').onchange = () => { readSplits(); renderSplits(); refresh(); };
+  $('#l-fx-toggle').onchange = () => {
+    $('#fx-row').style.display = $('#l-fx-toggle').checked ? '' : 'none';
+  };
+  $('#l-eventId').onchange = () => {
+    const ev = DB.events.find(e => e.id === $('#l-eventId').value);
+    if (!ev) return;
+    if (ev.startDate) $('#l-date').value = ev.startDate;
+    const auto = (CAT_LABEL[catNow()] || '') + ' - ' + ev.name;
+    const t = $('#l-title');
+    if (!t.value.trim() || / - /.test(t.value)) t.value = auto;
+  };
+
   $('#ledger-save').onclick = () => {
-    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
     l.category = $('#l-category').value;
     l.type = 'expense';
     l.eventId = $('#l-eventId').value;
     l.paymentMethod = $('#l-paymentMethod').value;
-    l.currency = $('#l-currency').value;
+    l.currency = $('#l-fx-toggle').checked ? $('#l-currency').value : l.currency;
     ['amountTwd', 'originalAmount', 'exchangeRate', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketCount'].forEach(k => {
       const v = $('#l-' + k).value;
       l[k] = v === '' ? '' : num(v);
     });
+    if (!l.title && l.eventId) {
+      const ev = DB.events.find(e => e.id === l.eventId);
+      if (ev) l.title = (CAT_LABEL[l.category] || '') + ' - ' + ev.name;
+    }
     readSplits();
     l.splits = l.splits.filter(s => s.name && num(s.amountTwd) > 0);
     saveLedger(l);

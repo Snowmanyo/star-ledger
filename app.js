@@ -51,6 +51,16 @@ function sheetTitleHtml(title, withDelete, delId, withBack) {
     <button class="icon-mini" id="sh-close" aria-label="關閉">${ICONS.close}</button>
   </span></div>`;
 }
+const splitList = l => Array.isArray(l.splits) ? l.splits : [];
+const splitTotal = l => {
+  const sp = splitList(l);
+  return sp.length ? sp.reduce((s, x) => s + num(x.amountTwd), 0) : num(l.expectedReceivableTwd);
+};
+const ledgerOut = rows => rows.map(r => Object.assign({}, r, { splits: JSON.stringify(splitList(r)) }));
+function eventTitle(e) {
+  return (e.eventType === '拼盤' || !e.artist || String(e.name).includes(e.artist))
+    ? e.name : e.artist + ' - ' + e.name;
+}
 function seatText(l) {
   const part = (v, suf) => v ? (String(v).endsWith(suf) ? String(v) : v + suf) : '';
   return [l.ticketArea || '', part(l.ticketRow, '排'), part(l.ticketSeat, '號')].filter(Boolean).join(' ');
@@ -61,7 +71,7 @@ const NUMF = {
   items: ['unitPrice', 'quantity', 'salePriceTwd', 'soldQuantity'],
   sales: ['unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity'],
   events: ['ticketPriceTwd'],
-  ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd'],
+  ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketCount'],
 };
 const BOOLF = {
   orders: ['settled'],
@@ -93,6 +103,9 @@ function normRow(table, row) {
   const out = Object.assign({}, row);
   NUMF[table].forEach(k => { out[k] = out[k] === '' || out[k] == null ? '' : num(out[k]); });
   BOOLF[table].forEach(k => { out[k] = toBool(out[k]); });
+  if (table === 'ledger' && typeof out.splits === 'string') {
+    try { out.splits = JSON.parse(out.splits || '[]'); } catch (e) { out.splits = []; }
+  }
   return out;
 }
 function assembleDB(raw) {
@@ -117,7 +130,7 @@ function orderItemRows(order) {
 function splitDB(db) {
   const items = [];
   db.orders.forEach(o => items.push(...orderItemRows(o)));
-  return { orders: db.orders, items, sales: db.sales, events: db.events, ledger: db.ledger };
+  return { orders: db.orders, items, sales: db.sales, events: db.events, ledger: ledgerOut(db.ledger) };
 }
 
 /* ---------- 雲端 API ---------- */
@@ -381,17 +394,17 @@ function deleteEvent(ev) {
   saveDB();
   const ops = [{ action: 'delete', table: 'events', ids: [ev.id] }];
   if (changed.length) ops.push({ action: 'upsert', table: 'events', rows: changed });
-  if (orphans.length) ops.push({ action: 'upsert', table: 'ledger', rows: orphans });
+  if (orphans.length) ops.push({ action: 'upsert', table: 'ledger', rows: ledgerOut(orphans) });
   pushOps(ops);
 }
 // 活動的票價與座位由掛在它底下的票券流水彙整而來
-// 活動頁只記錄自己的紀錄：票價＝自己實際負擔（金額扣掉朋友應結的部分）
+// 活動頁只記錄自己的紀錄：票價＝自己實際負擔（總金額扣掉幫別人代墊的部分）
 function syncEventFromTickets(eventId) {
   const ev = DB.events.find(e => e.id === eventId);
   if (!ev) return null;
   const tickets = DB.ledger.filter(l => l.eventId === eventId && l.category === 'ticket');
   if (!tickets.length) return null;
-  ev.ticketPriceTwd = tickets.reduce((s, l) => s + Math.max(0, num(l.amountTwd) - num(l.expectedReceivableTwd)), 0);
+  ev.ticketPriceTwd = tickets.reduce((s, l) => s + Math.max(0, num(l.amountTwd) - splitTotal(l)), 0);
   const seats = tickets.map(seatText).filter(Boolean);
   if (seats.length) ev.seat = seats.join(' ');
   return ev;
@@ -399,7 +412,7 @@ function syncEventFromTickets(eventId) {
 function saveLedger(entry) {
   const i = DB.ledger.findIndex(l => l.id === entry.id);
   if (i >= 0) DB.ledger[i] = entry; else DB.ledger.unshift(entry);
-  const ops = [{ action: 'upsert', table: 'ledger', rows: [entry] }];
+  const ops = [{ action: 'upsert', table: 'ledger', rows: ledgerOut([entry]) }];
   if (entry.eventId) {
     const ev = syncEventFromTickets(entry.eventId);
     if (ev) ops.push({ action: 'upsert', table: 'events', rows: [ev] });
@@ -420,6 +433,11 @@ function deleteLedger(entry) {
 
 /* ---------- 總帳彙整 ---------- */
 function entrySettle(l) {
+  const sp = splitList(l);
+  if (sp.length) {
+    const done = sp.filter(s => s.settled).length;
+    return done === sp.length ? 'settled' : done ? 'partial' : 'unsettled';
+  }
   const exp = num(l.expectedReceivableTwd);
   if (exp) {
     const got = num(l.receivedTwd);
@@ -516,7 +534,7 @@ function renderHome(view) {
       ${e.coverUrl ? `<img class="cover-thumb" src="${esc(e.coverUrl)}" alt="" loading="lazy">` : ''}
       <div style="flex:1;min-width:0">
         <div class="row-head">
-          <div class="row-title">${esc(e.name)}</div>
+          <div class="row-title">${esc(eventTitle(e))}</div>
           <span class="badge accent">${daysTo(e.startDate) === 0 ? '今天' : daysTo(e.startDate) + ' 天後'}</span>
         </div>
         <div class="row-meta">
@@ -882,8 +900,7 @@ function eventListHtml() {
   </div>
   <div class="section-note">${list.length} 場活動</div>`;
   if (!list.length) html += emptyHtml('沒有符合的活動');
-  const evTitle = e => (e.eventType === '拼盤' || !e.artist || String(e.name).includes(e.artist))
-    ? e.name : e.artist + ' - ' + e.name;
+  const evTitle = eventTitle;
   html += list.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
     <div style="display:flex;gap:12px">
       ${e.coverUrl ? `<img class="cover-thumb" src="${esc(e.coverUrl)}" alt="" loading="lazy">` : ''}
@@ -992,13 +1009,20 @@ function groupStatus(g) {
 /* 分帳總覽：互相應給多少 */
 function splitHtml() {
   const pair = {};
-  DB.ledger.forEach(l => {
-    const owe = num(l.expectedReceivableTwd) - num(l.receivedTwd);
-    if (owe <= 0 || !l.counterparty || !l.payer || l.counterparty === l.payer) return;
-    const k = l.counterparty + '|' + l.payer;
-    pair[k] = pair[k] || { from: l.counterparty, to: l.payer, amt: 0, items: [] };
+  const addOwe = (from, to, owe, l) => {
+    if (owe <= 0 || !from || !to || from === to) return;
+    const k = from + '|' + to;
+    pair[k] = pair[k] || { from, to, amt: 0, items: [] };
     pair[k].amt += owe;
-    pair[k].items.push(l);
+    if (!pair[k].items.includes(l)) pair[k].items.push(l);
+  };
+  DB.ledger.forEach(l => {
+    const sp = splitList(l);
+    if (sp.length) {
+      sp.forEach(s => { if (!s.settled) addOwe(s.name, l.payer, num(s.amountTwd), l); });
+    } else {
+      addOwe(l.counterparty, l.payer, num(l.expectedReceivableTwd) - num(l.receivedTwd), l);
+    }
   });
   const done = {}, nets = [];
   Object.keys(pair).forEach(k => {
@@ -1092,7 +1116,7 @@ function renderLedger(view) {
   if (!groupList.length) html += emptyHtml('沒有符合的紀錄');
   html += groupList.map(g => {
     const sum = g.entries.reduce((s, l) => s + num(l.amountTwd), 0);
-    const name = g.ev ? g.ev.name : '未指定活動';
+    const name = g.ev ? eventTitle(g.ev) : '未指定活動';
     const open = state.openGroups['g:' + g.eid] ? ' open' : '';
     return `<div class="group${open}" data-group="g:${esc(g.eid)}">
       <button class="group-head">
@@ -1132,7 +1156,9 @@ function ledgerRowHtml(l) {
         ${l.payer ? `<span>付款 ${esc(l.payer)}</span>` : ''}
         ${seat ? `<span>${esc(seat)}</span>` : ''}
         ${l.attendee ? `<span>${esc(l.attendee)}</span>` : ''}
-        ${num(l.expectedReceivableTwd) ? `<span>應結 ${fmtInt(l.expectedReceivableTwd)}／已結 ${fmtInt(l.receivedTwd)}${l.counterparty ? '（' + esc(l.counterparty) + '）' : ''}</span>` : ''}
+        ${splitList(l).length
+          ? `<span>${splitList(l).map(s => esc(s.name) + ' ' + fmtInt(s.amountTwd) + (s.settled ? '（已付）' : '（未付）')).join('、')}</span>`
+          : (num(l.expectedReceivableTwd) ? `<span>應結 ${fmtInt(l.expectedReceivableTwd)}／已結 ${fmtInt(l.receivedTwd)}${l.counterparty ? '（' + esc(l.counterparty) + '）' : ''}</span>` : '')}
       </div>
     </div>
     <span class="amount ${l.type === 'income' ? 'ok' : ''}">${l.type === 'income' ? '+' : ''}${fmtInt(l.amountTwd)}</span>
@@ -1618,13 +1644,12 @@ function openLedgerForm(existing, preset, backEventId) {
   const l = existing ? JSON.parse(JSON.stringify(existing)) : Object.assign({
     id: uid(), type: 'expense', category: 'ticket', date: today(), title: '', eventId: '',
     amountTwd: '', currency: '', originalAmount: '', exchangeRate: '', payer: '', paymentMethod: '',
-    paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: false, notes: '',
+    paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '', notes: '',
     ticketType: '', ticketArea: '', ticketRow: '', ticketSeat: '', attendee: '', ticketStatus: '',
-    ticketFaceTwd: '', ticketBenefitTwd: '', ticketFeeTwd: '', ticketPlatform: '', ticketAccount: '', createdAt: today(),
+    ticketFaceTwd: '', ticketBenefitTwd: '', ticketFeeTwd: '', ticketPlatform: '', ticketAccount: '',
+    ticketCount: 1, splits: [], createdAt: today(),
   }, preset || {});
-  const settledChecked = (l.settled === undefined || l.settled === null || l.settled === '')
-    ? !!(DB.events.find(e => e.id === l.eventId) || {}).settled
-    : toBool(l.settled);
+  if (!Array.isArray(l.splits)) l.splits = [];
 
   const evOpts = [['', '不指定活動']].concat(
     DB.events.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)))
@@ -1632,6 +1657,17 @@ function openLedgerForm(existing, preset, backEventId) {
   const catOpts = Object.entries(CAT_LABEL);
   const payOpts = [['', '—'], ['cash', '現金'], ['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付']];
   const curOpts = [['', '—']].concat(CURRENCIES.map(c => [c, c]));
+
+  function splitRow(s, i) {
+    return `<div class="item-block" data-split="${i}" style="padding-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input data-sk="name" data-si="${i}" list="dl-cp" placeholder="人名" value="${esc(s.name)}" style="flex:1.2">
+        <input data-sk="amountTwd" data-si="${i}" type="number" inputmode="numeric" placeholder="應付金額" value="${esc(s.amountTwd)}" style="flex:1">
+        <button class="icon-mini danger" data-del-split="${i}" aria-label="移除">${ICONS.trash}</button>
+      </div>
+      <label class="check-row" style="margin-top:6px">對方已付款 <input type="checkbox" data-sk="settled" data-si="${i}" ${s.settled ? 'checked' : ''}></label>
+    </div>`;
+  }
 
   const html = `
   ${sheetTitleHtml(isNew ? '新增流水' : '編輯流水', !isNew, 'ledger-del', !!backEventId)}
@@ -1643,36 +1679,16 @@ function openLedgerForm(existing, preset, backEventId) {
   <div class="field" id="l-event-wrap">
     <label>活動場次</label>${selectHtml('l-eventId', evOpts, l.eventId)}
   </div>
-  ${fieldHtml('金額（台幣）', `<input id="l-amountTwd" type="number" inputmode="numeric" value="${esc(l.amountTwd)}">`)}
-  <div class="field-row">
-    ${fieldHtml('原幣', selectHtml('l-currency', curOpts, l.currency))}
-    ${fieldHtml('原幣金額', `<input id="l-originalAmount" type="number" inputmode="decimal" value="${esc(l.originalAmount)}">`)}
-    ${fieldHtml('匯率', `<input id="l-exchangeRate" type="number" step="any" inputmode="decimal" value="${esc(l.exchangeRate)}">`)}
-  </div>
-  <div class="field-row">
-    ${fieldHtml('付款人', `<input id="l-payer" list="dl-payer3" value="${esc(l.payer)}">`)}
-    ${fieldHtml('付款方式', selectHtml('l-paymentMethod', payOpts, l.paymentMethod))}
-  </div>
-  <datalist id="dl-payer3">${datalistOptions(DB.ledger.map(x => x.payer).concat(DB.orders.map(x => x.payer)))}</datalist>
-  ${fieldHtml('付款工具', `<input id="l-paymentDetail" value="${esc(l.paymentDetail)}">`)}
-  <label class="check-row">已結清 <input type="checkbox" id="l-settled" ${settledChecked ? 'checked' : ''}></label>
-
-  <div class="form-section">分帳</div>
-  ${fieldHtml('對象（可下拉選擇或直接輸入新名字）', `<input id="l-counterparty" list="dl-cp" value="${esc(l.counterparty)}">`)}
-  <datalist id="dl-cp">${datalistOptions(DB.ledger.flatMap(x => [x.counterparty, x.payer]).concat(DB.orders.map(x => x.payer)))}</datalist>
-  <div class="field-row">
-    ${fieldHtml('應結金額', `<input id="l-expectedReceivableTwd" type="number" inputmode="numeric" value="${esc(l.expectedReceivableTwd)}">`)}
-    ${fieldHtml('已結金額', `<input id="l-receivedTwd" type="number" inputmode="numeric" value="${esc(l.receivedTwd)}">`)}
-  </div>
 
   <div id="ticket-wrap" style="${l.category === 'ticket' ? '' : 'display:none'}">
-    <div class="form-section">票券資訊</div>
+    <div class="form-section">買了什麼票</div>
     <div class="field-row">
-      ${fieldHtml('票面金額', `<input id="l-ticketFaceTwd" type="number" inputmode="numeric" value="${esc(l.ticketFaceTwd)}">`)}
-      ${fieldHtml('福利金額', `<input id="l-ticketBenefitTwd" type="number" inputmode="numeric" value="${esc(l.ticketBenefitTwd)}">`)}
-      ${fieldHtml('手續費', `<input id="l-ticketFeeTwd" type="number" inputmode="numeric" value="${esc(l.ticketFeeTwd)}">`)}
+      ${fieldHtml('單張票面', `<input id="l-ticketFaceTwd" type="number" inputmode="numeric" value="${esc(l.ticketFaceTwd)}">`)}
+      ${fieldHtml('單張福利', `<input id="l-ticketBenefitTwd" type="number" inputmode="numeric" value="${esc(l.ticketBenefitTwd)}">`)}
+      ${fieldHtml('張數', `<input id="l-ticketCount" type="number" inputmode="numeric" value="${esc(l.ticketCount || 1)}">`)}
     </div>
-    <div class="hint">總價＝票面＋福利＋手續費，輸入後會自動帶入上方「金額（台幣）」</div>
+    ${fieldHtml('手續費（整筆訂單一次）', `<input id="l-ticketFeeTwd" type="number" inputmode="numeric" value="${esc(l.ticketFeeTwd)}">`)}
+    <div class="hint" id="tk-hint"></div>
     <div class="field-row">
       ${fieldHtml('購票平台', `<input id="l-ticketPlatform" list="dl-tplatform" placeholder="例：拓元、KKTIX" value="${esc(l.ticketPlatform)}">`)}
       ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
@@ -1689,6 +1705,27 @@ function openLedgerForm(existing, preset, backEventId) {
     </div>
     ${fieldHtml('票券狀態', `<input id="l-ticketStatus" list="dl-tstatus" value="${esc(l.ticketStatus)}"><datalist id="dl-tstatus"><option value="已使用"><option value="未使用"><option value="轉讓"><option value="退票"></datalist>`)}
   </div>
+
+  <div class="form-section">我實際付了多少</div>
+  ${fieldHtml('總金額（台幣，我付的全額）', `<input id="l-amountTwd" type="number" inputmode="numeric" value="${esc(l.amountTwd)}">`)}
+  <div class="field-row">
+    ${fieldHtml('原幣', selectHtml('l-currency', curOpts, l.currency))}
+    ${fieldHtml('原幣金額', `<input id="l-originalAmount" type="number" inputmode="decimal" value="${esc(l.originalAmount)}">`)}
+    ${fieldHtml('匯率', `<input id="l-exchangeRate" type="number" step="any" inputmode="decimal" value="${esc(l.exchangeRate)}">`)}
+  </div>
+  <div class="field-row">
+    ${fieldHtml('付款人', `<input id="l-payer" list="dl-payer3" value="${esc(l.payer)}">`)}
+    ${fieldHtml('付款方式', selectHtml('l-paymentMethod', payOpts, l.paymentMethod))}
+  </div>
+  <datalist id="dl-payer3">${datalistOptions(DB.ledger.map(x => x.payer).concat(DB.orders.map(x => x.payer)))}</datalist>
+  ${fieldHtml('付款工具', `<input id="l-paymentDetail" value="${esc(l.paymentDetail)}">`)}
+
+  <div class="form-section">有幫誰代墊 <button class="btn line small" id="add-split">＋ 加一個人</button></div>
+  <div class="hint">自己的份不用填；填了別人，這筆就會出現在「分帳」頁，對方給錢後勾「已付款」。</div>
+  <datalist id="dl-cp">${datalistOptions(DB.ledger.flatMap(x => [x.counterparty, x.payer].concat(splitList(x).map(s => s.name))).concat(DB.orders.map(x => x.payer)))}</datalist>
+  <div id="splits-wrap">${l.splits.map(splitRow).join('')}</div>
+  <div class="hint" id="own-hint"></div>
+
   ${fieldHtml('備註', `<textarea id="l-notes" rows="2">${esc(l.notes)}</textarea>`)}
   <div class="sheet-actions">
     <button class="btn primary" id="ledger-save">儲存流水</button>
@@ -1702,27 +1739,72 @@ function openLedgerForm(existing, preset, backEventId) {
   };
   if (backEventId) $('#sh-back').onclick = goBack;
 
+  const perTicket = () => num($('#l-ticketFaceTwd').value) + num($('#l-ticketBenefitTwd').value);
+  const tCount = () => Math.max(1, num($('#l-ticketCount').value) || 1);
+  function readSplits() {
+    $$('#splits-wrap [data-sk]').forEach(inp => {
+      const s = l.splits[Number(inp.dataset.si)];
+      if (!s) return;
+      if (inp.type === 'checkbox') s[inp.dataset.sk] = inp.checked;
+      else if (inp.dataset.sk === 'amountTwd') s.amountTwd = inp.value === '' ? '' : num(inp.value);
+      else s[inp.dataset.sk] = inp.value.trim();
+    });
+  }
+  function refreshHints() {
+    if ($('#l-category').value === 'ticket') {
+      const total = perTicket() * tCount() + num($('#l-ticketFeeTwd').value);
+      $('#tk-hint').textContent = total ? `總金額自動計算：(票面＋福利)×張數＋手續費 = ${fmtTwd(total)}` : '總金額＝(票面＋福利)×張數＋手續費，會自動帶入下方';
+    }
+    readSplits();
+    const others = l.splits.reduce((s, x) => s + num(x.amountTwd), 0);
+    const own = num($('#l-amountTwd').value) - others;
+    $('#own-hint').textContent = others ? `別人合計 ${fmtTwd(others)}，自己的份 ${fmtTwd(own)}` : '';
+  }
+  function rebindSplits() {
+    $$('#splits-wrap [data-del-split]').forEach(b => b.onclick = () => {
+      readSplits();
+      l.splits.splice(Number(b.dataset.delSplit), 1);
+      $('#splits-wrap').innerHTML = l.splits.map(splitRow).join('');
+      rebindSplits();
+      refreshHints();
+    });
+  }
+  rebindSplits();
+  refreshHints();
+  $('#sheet').oninput = refreshHints;
+
+  $('#add-split').onclick = () => {
+    readSplits();
+    const suggest = $('#l-category').value === 'ticket'
+      ? Math.round(perTicket() + num($('#l-ticketFeeTwd').value) / tCount()) || ''
+      : '';
+    l.splits.push({ name: '', amountTwd: suggest, settled: false });
+    $('#splits-wrap').innerHTML = l.splits.map(splitRow).join('');
+    rebindSplits();
+    refreshHints();
+  };
   $('#l-category').onchange = () => {
     $('#ticket-wrap').style.display = $('#l-category').value === 'ticket' ? '' : 'none';
   };
-  ['l-ticketFaceTwd', 'l-ticketBenefitTwd', 'l-ticketFeeTwd'].forEach(id => {
-    $('#' + id).oninput = () => {
-      const total = num($('#l-ticketFaceTwd').value) + num($('#l-ticketBenefitTwd').value) + num($('#l-ticketFeeTwd').value);
+  ['l-ticketFaceTwd', 'l-ticketBenefitTwd', 'l-ticketFeeTwd', 'l-ticketCount'].forEach(id => {
+    $('#' + id).addEventListener('input', () => {
+      const total = perTicket() * tCount() + num($('#l-ticketFeeTwd').value);
       if (total) $('#l-amountTwd').value = total;
-    };
+    });
   });
   $('#ledger-save').onclick = () => {
-    ['date', 'title', 'payer', 'paymentDetail', 'counterparty', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
     l.category = $('#l-category').value;
     l.type = 'expense';
     l.eventId = $('#l-eventId').value;
     l.paymentMethod = $('#l-paymentMethod').value;
     l.currency = $('#l-currency').value;
-    l.settled = $('#l-settled').checked;
-    ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd'].forEach(k => {
+    ['amountTwd', 'originalAmount', 'exchangeRate', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketCount'].forEach(k => {
       const v = $('#l-' + k).value;
       l[k] = v === '' ? '' : num(v);
     });
+    readSplits();
+    l.splits = l.splits.filter(s => s.name && num(s.amountTwd) > 0);
     saveLedger(l);
     render();
     toast('流水已儲存');
@@ -1739,22 +1821,30 @@ function openLedgerForm(existing, preset, backEventId) {
   }
 }
 
-/* ---------- 舊格式標題整理 ---------- */
-// 早期範本產生的「活動名稱｜分類」改成「分類 - 活動名稱」；自訂標題不動
+/* ---------- 舊格式整理 ---------- */
+// 1) 早期範本標題「活動名稱｜分類」改成「分類 - 活動名稱」；自訂標題不動
+// 2) 舊的單人分帳欄位（對象／應結／已結）轉成多人 splits
 function migrateTitles() {
-  const changed = [];
+  const changed = new Set();
   DB.ledger.forEach(l => {
     const ev = l.eventId && DB.events.find(e => e.id === l.eventId);
     const cat = CAT_LABEL[l.category];
-    if (!ev || !cat) return;
-    if (l.title === ev.name + '｜' + cat) {
+    if (ev && cat && l.title === ev.name + '｜' + cat) {
       l.title = cat + ' - ' + ev.name;
-      changed.push(l);
+      changed.add(l);
+    }
+    if (!splitList(l).length && l.counterparty && num(l.expectedReceivableTwd) > 0) {
+      l.splits = [{
+        name: l.counterparty,
+        amountTwd: num(l.expectedReceivableTwd),
+        settled: num(l.receivedTwd) >= num(l.expectedReceivableTwd),
+      }];
+      changed.add(l);
     }
   });
-  if (changed.length) {
+  if (changed.size) {
     saveDB();
-    pushOps([{ action: 'upsert', table: 'ledger', rows: changed }]);
+    pushOps([{ action: 'upsert', table: 'ledger', rows: ledgerOut([...changed]) }]);
   }
 }
 

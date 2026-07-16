@@ -96,13 +96,15 @@ const NUMF = {
   sales: ['unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity'],
   events: ['ticketPriceTwd'],
   ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketCount'],
+  transfers: ['ticketCount', 'costTwd', 'amountTwd'],
 };
 const BOOLF = {
   orders: ['settled'],
   items: ['arrived', 'sorted', 'proxyPaid'],
   sales: ['managedByOwnership'],
   events: ['settled'],
-  ledger: [],
+  ledger: ['ticketPickedUp'],
+  transfers: ['settled'],
 };
 
 /* ---------- 設定與快取 ---------- */
@@ -111,6 +113,7 @@ let CFG = Object.assign({ theme: 'milktea', apiUrl: '', key: '', sheetUrl: '', l
 const saveCfg = () => localStorage.setItem('sl-config', JSON.stringify(CFG));
 
 let DB = JSON.parse(localStorage.getItem('sl-db') || 'null') || { orders: [], sales: [], events: [], ledger: [] };
+DB.transfers = DB.transfers || [];
 const saveDB = () => localStorage.setItem('sl-db', JSON.stringify(DB));
 const isDirty = () => localStorage.getItem('sl-dirty') === '1';
 const markDirty = () => localStorage.setItem('sl-dirty', '1');
@@ -146,6 +149,7 @@ function assembleDB(raw) {
     sales: (raw.sales || []).map(r => normRow('sales', r)),
     events: (raw.events || []).map(r => normRow('events', r)),
     ledger: (raw.ledger || []).map(r => normRow('ledger', r)),
+    transfers: (raw.transfers || []).map(r => normRow('transfers', r)),
   };
 }
 function orderItemRows(order) {
@@ -154,7 +158,7 @@ function orderItemRows(order) {
 function splitDB(db) {
   const items = [];
   db.orders.forEach(o => items.push(...orderItemRows(o)));
-  return { orders: db.orders, items, sales: db.sales, events: db.events, ledger: ledgerOut(db.ledger) };
+  return { orders: db.orders, items, sales: db.sales, events: db.events, ledger: ledgerOut(db.ledger), transfers: db.transfers || [] };
 }
 
 /* ---------- 雲端 API ---------- */
@@ -544,6 +548,12 @@ function renderHome(view) {
   const pendingOrders = DB.orders.filter(o => (o.items || []).some(it => !it.arrived)).length;
   const unsettled = DB.events.filter(e => !e.settled).length;
   const daysTo = d => Math.ceil((new Date(d) - now) / 86400000);
+  const pickups = DB.ledger.filter(l => {
+    if (l.category !== 'ticket' || toBool(l.ticketPickedUp)) return false;
+    if (!l.ticketPickupDate || String(l.ticketPickupDate) > t) return false;
+    const ev = DB.events.find(e => e.id === l.eventId);
+    return !ev || String(ev.startDate || '9999') >= t;
+  });
 
   view.innerHTML = `
   <div class="section-note" style="letter-spacing:.1em">${dateLine}</div>
@@ -552,6 +562,20 @@ function renderHome(view) {
     <button class="stat" data-quick="event"><div class="n">＋</div><div class="l">新增活動</div></button>
     <button class="stat" data-quick="ledger"><div class="n">＋</div><div class="l">新增流水</div></button>
   </div>
+  ${pickups.length ? `<div class="form-section" style="margin-top:18px">可以領票了 🎫</div>` + pickups.map(l => {
+    const ev = DB.events.find(e => e.id === l.eventId);
+    return `<div class="card tappable" data-pickup="${esc(l.id)}">
+      <div class="row-head">
+        <div class="row-title">${esc(l.title || (ev ? eventTitle(ev) : '票券'))}</div>
+        <span class="badge warn">可領票</span>
+      </div>
+      <div class="row-meta">
+        <span>領票日 ${esc(l.ticketPickupDate)}</span>
+        ${ev && ev.startDate ? `<span>演出 ${esc(ev.startDate)}</span>` : ''}
+        ${l.ticketPlatform ? `<span>${esc(l.ticketPlatform)}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('') : ''}
   <div class="form-section" style="margin-top:18px">即將到來的活動</div>
   ${upcoming.length ? upcoming.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
     <div style="display:flex;gap:12px">
@@ -583,6 +607,10 @@ function renderHome(view) {
     if (b.dataset.quick === 'order') openOrderForm(null);
     else if (b.dataset.quick === 'event') openEventForm(null);
     else openLedgerForm(null);
+  });
+  $$('[data-pickup]', view).forEach(el => el.onclick = () => {
+    const l = DB.ledger.find(x => x.id === el.dataset.pickup);
+    if (l) openLedgerForm(l);
   });
   $$('[data-goto]', view).forEach(b => b.onclick = () => {
     const k = b.dataset.goto;
@@ -1079,13 +1107,54 @@ function splitHtml() {
   }).join('');
   return html;
 }
+const lgSegHtml = on => `<div class="seg">
+  <button data-lgseg="flow" class="${on === 'flow' ? 'on' : ''}">流水</button>
+  <button data-lgseg="split" class="${on === 'split' ? 'on' : ''}">分帳</button>
+  <button data-lgseg="transfer" class="${on === 'transfer' ? 'on' : ''}">讓票</button>
+</div>`;
+function bindLgSeg(view) {
+  $$('[data-lgseg]', view).forEach(b => b.onclick = () => { state.lgSeg = b.dataset.lgseg; state.openGroups = {}; render(); });
+}
+function transfersHtml() {
+  const list = (DB.transfers || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  if (!list.length) return emptyHtml('還沒有讓票／換票紀錄，點右下角＋新增');
+  const unsettledSum = list.reduce((s, t) => s + (t.settled ? 0 : num(t.amountTwd)), 0);
+  let html = `<div class="stat-strip" style="grid-template-columns:repeat(2,1fr)">
+    <div class="stat"><div class="n">${list.length}</div><div class="l">紀錄筆數</div></div>
+    <div class="stat"><div class="n">${fmtInt(unsettledSum)}</div><div class="l">未收 TWD</div></div>
+  </div>`;
+  html += list.map(t => {
+    const ev = DB.events.find(e => e.id === t.eventId);
+    const seat = seatText({ ticketArea: t.ticketArea, ticketRow: t.ticketRow, ticketSeat: t.ticketSeat });
+    return `<div class="card tappable" data-transfer="${esc(t.id)}">
+      <div class="row-head">
+        <div class="row-title"><span class="badge accent">${esc(t.kind || '讓票')}</span> ${esc(ev ? eventTitle(ev) : (t.notes || '未指定活動'))}</div>
+        ${num(t.amountTwd) ? `<div class="amount">${fmtInt(t.amountTwd)}</div>` : ''}
+      </div>
+      <div class="row-meta">
+        <span>${esc(t.date || '')}</span>
+        ${t.person ? `<span>對象 ${esc(t.person)}</span>` : ''}
+        ${num(t.ticketCount) ? `<span>${fmtInt(t.ticketCount)} 張</span>` : ''}
+        ${seat ? `<span>${esc(seat)}</span>` : ''}
+      </div>
+      <div style="margin-top:6px">${num(t.amountTwd) ? (t.settled ? '<span class="badge ok">已收款</span>' : '<span class="badge danger">未收款</span>') : ''}</div>
+    </div>`;
+  }).join('');
+  return html;
+}
 function renderLedger(view) {
+  if (state.lgSeg === 'transfer') {
+    view.innerHTML = lgSegHtml('transfer') + transfersHtml();
+    bindLgSeg(view);
+    $$('[data-transfer]', view).forEach(el => el.onclick = () => {
+      const t = DB.transfers.find(x => x.id === el.dataset.transfer);
+      if (t) openTransferForm(t);
+    });
+    return;
+  }
   if (state.lgSeg === 'split') {
-    view.innerHTML = `<div class="seg">
-      <button data-lgseg="flow">流水</button>
-      <button data-lgseg="split" class="on">分帳</button>
-    </div>` + splitHtml();
-    $$('[data-lgseg]', view).forEach(b => b.onclick = () => { state.lgSeg = b.dataset.lgseg; state.openGroups = {}; render(); });
+    view.innerHTML = lgSegHtml('split') + splitHtml();
+    bindLgSeg(view);
     bindGroups(view);
     $$('[data-ledger]', view).forEach(el => el.onclick = e => {
       e.stopPropagation();
@@ -1119,10 +1188,7 @@ function renderLedger(view) {
   const stCounts = { settled: 0, partial: 0, unsettled: 0 };
   expenses.forEach(l => { const s = entrySettle(l); if (s) stCounts[s]++; });
 
-  let html = `<div class="seg">
-    <button data-lgseg="flow" class="on">流水</button>
-    <button data-lgseg="split">分帳</button>
-  </div>
+  let html = lgSegHtml('flow') + `
   <div class="searchbar">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     <input id="lg-search" placeholder="搜尋標題、活動、對象…" value="${esc(state.search)}">
@@ -1155,7 +1221,7 @@ function renderLedger(view) {
   }).join('');
   view.innerHTML = html;
 
-  $$('[data-lgseg]', view).forEach(b => b.onclick = () => { state.lgSeg = b.dataset.lgseg; state.openGroups = {}; render(); });
+  bindLgSeg(view);
   const si = $('#lg-search');
   si.oninput = () => { state.search = si.value; render(); const el = $('#lg-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
   $('#lg-cat', view).onchange = e => { state.cat = e.target.value; render(); };
@@ -1201,8 +1267,8 @@ function renderSettings(view) {
   <div class="swatches">${swatches}</div>
 
   <div class="form-section">個人</div>
-  <div class="field"><label>我的名字（分帳時用來認出哪一份是你的）</label><input id="cfg-myname" placeholder="例：Chi" value="${esc(CFG.myName)}"></div>
-  <div class="field"><label>常用名單（用逗號分隔，會出現在人名下拉）</label><input id="cfg-people" placeholder="例：Jhen, Joanne" value="${esc(CFG.people)}"></div>
+  <div class="field"><label>我的名字（分帳時用來認出哪一份是你的，輸入完自動儲存）</label><input id="cfg-myname" placeholder="例：Chi" value="${esc(CFG.myName)}"></div>
+  <div class="field"><label>常用名單（用逗號分隔，會出現在人名下拉，輸入完自動儲存）</label><input id="cfg-people" placeholder="例：Jhen, Joanne" value="${esc(CFG.people)}"></div>
 
   <div class="form-section">雲端同步</div>
   <div class="field"><label>APPS SCRIPT 網址</label><input id="cfg-api" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(CFG.apiUrl)}"></div>
@@ -1233,6 +1299,8 @@ function renderSettings(view) {
     applyTheme();
     render();
   });
+  $('#cfg-myname').onchange = () => { CFG.myName = $('#cfg-myname').value.trim(); saveCfg(); toast('已儲存我的名字'); };
+  $('#cfg-people').onchange = () => { CFG.people = $('#cfg-people').value.trim(); saveCfg(); toast('已儲存常用名單'); };
   $('#cfg-save').onclick = async () => {
     CFG.myName = $('#cfg-myname').value.trim();
     CFG.people = $('#cfg-people').value.trim();
@@ -1275,6 +1343,7 @@ function renderSettings(view) {
         sales: data.sales || [],
         events: data.events || [],
         ledger: data.ledger || [],
+        transfers: data.transfers || [],
       };
       saveDB();
       markDirty();
@@ -1677,7 +1746,7 @@ function openLedgerForm(existing, preset, backEventId) {
     paymentDetail: '', counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '', notes: '',
     ticketType: '', ticketArea: '', ticketRow: '', ticketSeat: '', attendee: '', ticketStatus: '',
     ticketFaceTwd: '', ticketBenefitTwd: '', ticketFeeTwd: '', ticketPlatform: '', ticketAccount: '',
-    ticketCount: 1, splits: [], createdAt: today(),
+    ticketCount: 1, splits: [], ticketPickupDate: '', ticketPickedUp: false, createdAt: today(),
   }, preset || {});
   if (!Array.isArray(l.splits)) l.splits = [];
   if (isNew && !l.splits.length) l.splits.push({ name: CFG.myName || '', count: 1, amountTwd: '', settled: false });
@@ -1737,6 +1806,12 @@ function openLedgerForm(existing, preset, backEventId) {
     <datalist id="dl-tplatform">${datalistOptions(DB.ledger.map(x => x.ticketPlatform))}</datalist>
     <div class="hint" id="tk-hint"></div>
     ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
+    <div class="field-row">
+      ${fieldHtml('領票日（不填＝隨時可領）', `<input id="l-ticketPickupDate" type="date" value="${esc(l.ticketPickupDate)}">`)}
+      <div class="field" style="flex:0 0 108px"><label>&nbsp;</label>
+        <label class="check-row" style="padding:9px 0">已領票 <input type="checkbox" id="l-ticketPickedUp" ${toBool(l.ticketPickedUp) ? 'checked' : ''}></label>
+      </div>
+    </div>
     <div class="field-row">
       ${fieldHtml('區域（自己的座位）', `<input id="l-ticketArea" value="${esc(l.ticketArea)}">`)}
       ${fieldHtml('排', `<input id="l-ticketRow" value="${esc(l.ticketRow)}">`)}
@@ -1849,6 +1924,16 @@ function openLedgerForm(existing, preset, backEventId) {
     renderSplits();
     refresh();
   };
+  $('#l-ticketCount').addEventListener('change', () => {
+    readSplits();
+    let sum = l.splits.reduce((s, x) => s + num(x.count), 0);
+    while (sum < tCount()) {
+      l.splits.push({ name: l.splits.length ? '' : (CFG.myName || ''), count: 1, amountTwd: perTicket() || '', settled: false });
+      sum++;
+    }
+    renderSplits();
+    refresh();
+  });
   $('#l-payer').onchange = () => { readSplits(); renderSplits(); refresh(); };
   $('#l-fx-toggle').onchange = () => {
     $('#fx-row').style.display = $('#l-fx-toggle').checked ? '' : 'none';
@@ -1863,7 +1948,8 @@ function openLedgerForm(existing, preset, backEventId) {
   };
 
   $('#ledger-save').onclick = () => {
-    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount', 'ticketPickupDate'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    l.ticketPickedUp = $('#l-ticketPickedUp').checked;
     l.category = $('#l-category').value;
     l.type = 'expense';
     l.eventId = $('#l-eventId').value;
@@ -1891,6 +1977,80 @@ function openLedgerForm(existing, preset, backEventId) {
       render();
       toast('流水已刪除');
       if (backEventId) goBack(); else closeSheet();
+    };
+  }
+}
+
+/* ---------- 讓票／換票 ---------- */
+function saveTransfer(t) {
+  DB.transfers = DB.transfers || [];
+  const i = DB.transfers.findIndex(x => x.id === t.id);
+  if (i >= 0) DB.transfers[i] = t; else DB.transfers.unshift(t);
+  saveDB();
+  pushOps([{ action: 'upsert', table: 'transfers', rows: [t] }]);
+}
+function deleteTransfer(t) {
+  DB.transfers = DB.transfers.filter(x => x.id !== t.id);
+  saveDB();
+  pushOps([{ action: 'delete', table: 'transfers', ids: [t.id] }]);
+}
+function openTransferForm(existing) {
+  const isNew = !existing;
+  const t = existing ? JSON.parse(JSON.stringify(existing)) : {
+    id: uid(), date: today(), eventId: '', kind: '讓票', person: '', ticketCount: 1,
+    ticketArea: '', ticketRow: '', ticketSeat: '', costTwd: '', amountTwd: '', settled: false, notes: '', createdAt: today(),
+  };
+  const evOpts = [['', '不指定活動']].concat(
+    DB.events.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)))
+      .map(e => [e.id, `${e.startDate || ''} ${e.name}`]));
+  const html = `
+  ${sheetTitleHtml(isNew ? '新增讓票紀錄' : '編輯讓票紀錄', !isNew, 'transfer-del')}
+  <div class="field-row">
+    ${fieldHtml('類型', `<input id="t-kind" list="dl-tkind" value="${esc(t.kind)}"><datalist id="dl-tkind"><option value="讓票"><option value="換票"><option value="轉賣"></datalist>`)}
+    ${fieldHtml('日期', `<input id="t-date" type="date" value="${esc(t.date)}">`)}
+  </div>
+  <div class="field"><label>活動場次</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
+  <div class="field-row">
+    ${fieldHtml('對象', `<input id="t-person" list="dl-cp2" value="${esc(t.person)}">`)}
+    ${fieldHtml('張數', `<input id="t-ticketCount" type="number" inputmode="numeric" value="${esc(t.ticketCount)}">`)}
+  </div>
+  <datalist id="dl-cp2">${datalistOptions(peopleList().concat((DB.transfers || []).map(x => x.person)))}</datalist>
+  <div class="field-row">
+    ${fieldHtml('區域', `<input id="t-ticketArea" value="${esc(t.ticketArea)}">`)}
+    ${fieldHtml('排', `<input id="t-ticketRow" value="${esc(t.ticketRow)}">`)}
+    ${fieldHtml('座號', `<input id="t-ticketSeat" value="${esc(t.ticketSeat)}">`)}
+  </div>
+  <div class="field-row">
+    ${fieldHtml('原始成本（選填）', `<input id="t-costTwd" type="number" inputmode="numeric" value="${esc(t.costTwd)}">`)}
+    ${fieldHtml('收回金額', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
+  </div>
+  <label class="check-row">已收款 <input type="checkbox" id="t-settled" ${t.settled ? 'checked' : ''}></label>
+  ${fieldHtml('備註', `<textarea id="t-notes" rows="2">${esc(t.notes)}</textarea>`)}
+  <div class="sheet-actions">
+    <button class="btn primary" id="transfer-save">儲存紀錄</button>
+  </div>`;
+  openSheet(html);
+  $('#sh-close').onclick = closeSheet;
+  $('#transfer-save').onclick = () => {
+    ['date', 'kind', 'person', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
+    t.eventId = $('#t-eventId').value;
+    t.settled = $('#t-settled').checked;
+    ['ticketCount', 'costTwd', 'amountTwd'].forEach(k => {
+      const v = $('#t-' + k).value;
+      t[k] = v === '' ? '' : num(v);
+    });
+    saveTransfer(t);
+    closeSheet();
+    render();
+    toast('讓票紀錄已儲存');
+  };
+  if (!isNew) {
+    $('#transfer-del').onclick = () => {
+      if (!confirm('刪除這筆讓票紀錄？')) return;
+      deleteTransfer(t);
+      closeSheet();
+      render();
+      toast('已刪除');
     };
   }
 }
@@ -1927,7 +2087,7 @@ $$('#tabbar button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
 $('#fab').onclick = () => {
   if (state.tab === 'orders') openOrderForm(null);
   else if (state.tab === 'events') openEventForm(null);
-  else if (state.tab === 'ledger') openLedgerForm(null);
+  else if (state.tab === 'ledger') (state.lgSeg === 'transfer' ? openTransferForm(null) : openLedgerForm(null));
 };
 $('#sync-btn').onclick = () => doSync(false);
 applyTheme();

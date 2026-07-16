@@ -385,12 +385,13 @@ function deleteEvent(ev) {
   pushOps(ops);
 }
 // 活動的票價與座位由掛在它底下的票券流水彙整而來
+// 活動頁只記錄自己的紀錄：票價＝自己實際負擔（金額扣掉朋友應結的部分）
 function syncEventFromTickets(eventId) {
   const ev = DB.events.find(e => e.id === eventId);
   if (!ev) return null;
   const tickets = DB.ledger.filter(l => l.eventId === eventId && l.category === 'ticket');
   if (!tickets.length) return null;
-  ev.ticketPriceTwd = tickets.reduce((s, l) => s + num(l.amountTwd), 0);
+  ev.ticketPriceTwd = tickets.reduce((s, l) => s + Math.max(0, num(l.amountTwd) - num(l.expectedReceivableTwd)), 0);
   const seats = tickets.map(seatText).filter(Boolean);
   if (seats.length) ev.seat = seats.join(' ');
   return ev;
@@ -511,14 +512,19 @@ function renderHome(view) {
   </div>
   <div class="form-section" style="margin-top:18px">即將到來的活動</div>
   ${upcoming.length ? upcoming.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
-    <div class="row-head">
-      <div class="row-title">${esc(e.name)}</div>
-      <span class="badge accent">${daysTo(e.startDate) === 0 ? '今天' : daysTo(e.startDate) + ' 天後'}</span>
-    </div>
-    <div class="row-meta">
-      <span>${esc(e.startDate)}</span>
-      ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
-      ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
+    <div style="display:flex;gap:12px">
+      ${e.coverUrl ? `<img class="cover-thumb" src="${esc(e.coverUrl)}" alt="" loading="lazy">` : ''}
+      <div style="flex:1;min-width:0">
+        <div class="row-head">
+          <div class="row-title">${esc(e.name)}</div>
+          <span class="badge accent">${daysTo(e.startDate) === 0 ? '今天' : daysTo(e.startDate) + ' 天後'}</span>
+        </div>
+        <div class="row-meta">
+          <span>${esc(e.startDate)}</span>
+          ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
+          ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
+        </div>
+      </div>
     </div>
   </div>`).join('') : emptyHtml('近期沒有安排活動')}
   <div class="form-section" style="margin-top:18px">待辦提醒</div>
@@ -879,22 +885,27 @@ function eventListHtml() {
   const evTitle = e => (e.eventType === '拼盤' || !e.artist || String(e.name).includes(e.artist))
     ? e.name : e.artist + ' - ' + e.name;
   html += list.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
-    <div class="row-head">
-      <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${esc(e.eventNumber || '–')}</span> ${esc(evTitle(e))}</div>
-      ${num(e.ticketPriceTwd) ? `<div class="amount">${fmtInt(e.ticketPriceTwd)}</div>` : ''}
-    </div>
-    <div class="row-meta">
-      <span>${esc(e.startDate || '—')}</span>
-      ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
-      ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
-    </div>
-    <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
-      <div style="min-width:0">
-        ${e.eventType ? `<span class="badge accent">${esc(e.eventType)}</span>` : ''}
-        ${e.liveTour ? `<span class="badge">${esc(e.liveTour)}</span>` : ''}
-        ${e.settled ? '<span class="badge ok">已結清</span>' : '<span class="badge danger">未結清</span>'}
+    <div style="display:flex;gap:12px">
+      ${e.coverUrl ? `<img class="cover-thumb" src="${esc(e.coverUrl)}" alt="" loading="lazy">` : ''}
+      <div style="flex:1;min-width:0">
+        <div class="row-head">
+          <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${esc(e.eventNumber || '–')}</span> ${esc(evTitle(e))}</div>
+          <div class="amount">${fmtInt(e.ticketPriceTwd)}</div>
+        </div>
+        <div class="row-meta">
+          <span>${esc(e.startDate || '—')}</span>
+          ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
+          ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
+        </div>
+        <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div style="min-width:0">
+            ${e.eventType ? `<span class="badge accent">${esc(e.eventType)}</span>` : ''}
+            ${e.liveTour ? `<span class="badge">${esc(e.liveTour)}</span>` : ''}
+            ${e.settled ? '<span class="badge ok">已結清</span>' : '<span class="badge danger">未結清</span>'}
+          </div>
+          <button class="icon-mini" data-copy-event="${esc(e.id)}" aria-label="複製活動">${ICONS.copy}</button>
+        </div>
       </div>
-      <button class="icon-mini" data-copy-event="${esc(e.id)}" aria-label="複製活動">${ICONS.copy}</button>
     </div>
   </div>`).join('');
   return html;
@@ -978,13 +989,8 @@ function eventStatsHtml() {
 function groupStatus(g) {
   return groupSettle(g.entries) || (g.ev ? (g.ev.settled ? 'settled' : 'unsettled') : null);
 }
-/* 分帳總覽：誰付了多少、互相應給多少 */
+/* 分帳總覽：互相應給多少 */
 function splitHtml() {
-  const paidBy = {};
-  DB.ledger.forEach(l => { if (l.payer && num(l.amountTwd)) paidBy[l.payer] = (paidBy[l.payer] || 0) + num(l.amountTwd); });
-  const paidRows = Object.entries(paidBy).sort((a, b) => b[1] - a[1]);
-  const maxPaid = paidRows.length ? paidRows[0][1] : 1;
-
   const pair = {};
   DB.ledger.forEach(l => {
     const owe = num(l.expectedReceivableTwd) - num(l.receivedTwd);
@@ -1010,16 +1016,7 @@ function splitHtml() {
     done[k] = done[rk] = true;
   });
 
-  let html = '';
-  if (paidRows.length) {
-    html += `<div class="card"><div class="chart-title">誰付了多少<span class="mini">全部支出依付款人加總</span></div>` +
-      paidRows.map(([p, amt]) => `<div class="bar-row">
-        <span class="bl">${esc(p)}</span>
-        <span class="track"><i style="width:${Math.max(4, Math.round(amt / maxPaid * 100))}%"></i></span>
-        <span class="bv">${fmtInt(amt)}</span>
-      </div>`).join('') + '</div>';
-  }
-  html += '<div class="form-section">互相應給</div>';
+  let html = '<div class="form-section" style="margin-top:6px">互相應給</div>';
   if (!nets.length) html += emptyHtml('目前沒有未結清的分帳');
   html += nets.map((n, i) => {
     const open = state.openGroups['s:' + i] ? ' open' : '';
@@ -1071,8 +1068,8 @@ function renderLedger(view) {
   if (state.settle) groupList = groupList.filter(g => groupStatus(g) === state.settle);
   groupList.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 
-  const totalSpend = expenses.reduce((s, l) => s + num(l.amountTwd), 0);
-  const unreceived = DB.ledger.reduce((s, l) => s + Math.max(0, num(l.expectedReceivableTwd) - num(l.receivedTwd)), 0);
+  const stCounts = { settled: 0, partial: 0, unsettled: 0 };
+  expenses.forEach(l => { const s = entrySettle(l); if (s) stCounts[s]++; });
 
   let html = `<div class="seg">
     <button data-lgseg="flow" class="on">流水</button>
@@ -1087,9 +1084,9 @@ function renderLedger(view) {
     <select id="lg-settle" class="${state.settle ? 'active' : ''}">${setOpts.map(([k, l]) => `<option ${state.settle === k ? 'selected' : ''} value="${k}">${l}</option>`).join('')}</select>
   </div>
   <div class="stat-strip">
-    <div class="stat"><div class="n">${fmtInt(totalSpend)}</div><div class="l">支出 TWD</div></div>
-    <div class="stat"><div class="n">${fmtInt(unreceived)}</div><div class="l">未收 TWD</div></div>
-    <div class="stat"><div class="n">${fmtInt(expenses.length)}</div><div class="l">流水筆數</div></div>
+    <div class="stat"><div class="n">${fmtInt(stCounts.unsettled)}</div><div class="l">未結清筆數</div></div>
+    <div class="stat"><div class="n">${fmtInt(stCounts.partial)}</div><div class="l">部分結清</div></div>
+    <div class="stat"><div class="n">${fmtInt(stCounts.settled)}</div><div class="l">已結清</div></div>
   </div>`;
 
   if (!groupList.length) html += emptyHtml('沒有符合的紀錄');
@@ -1482,7 +1479,7 @@ function openEventForm(existing) {
   const ev = existing ? JSON.parse(JSON.stringify(existing)) : {
     id: uid(), name: '', artist: '', city: '', venue: '', startDate: today(), endDate: '',
     eventNumber: '', originalDate: '', eventType: '', liveTour: '', seriesEvent: '',
-    seat: '', ticketPriceTwd: '', guest: '', payer: '', settled: false, notes: '', createdAt: today(),
+    seat: '', ticketPriceTwd: '', guest: '', payer: '', settled: false, notes: '', createdAt: today(), coverUrl: '',
   };
   const related = DB.ledger.filter(l => l.eventId === ev.id);
   const relatedHtml = related.length ? related.map(l => `
@@ -1496,6 +1493,7 @@ function openEventForm(existing) {
 
   const html = `
   ${sheetTitleHtml(isNew ? '新增活動' : '編輯活動 #' + esc(ev.eventNumber || '–'), !isNew, 'event-del')}
+  <img id="cover-preview" class="cover-hero" src="${esc(ev.coverUrl)}" alt="" style="${ev.coverUrl ? '' : 'display:none'}">
   <datalist id="dl-artist">${datalistOptions(DB.events.map(x => x.artist))}</datalist>
   <datalist id="dl-type">${datalistOptions(DB.events.map(x => x.eventType).concat(['專場', '演唱會', '簽售', '見面會', '快閃店']))}</datalist>
   <datalist id="dl-payer2">${datalistOptions(DB.events.map(x => x.payer).concat(DB.ledger.map(x => x.payer)))}</datalist>
@@ -1519,6 +1517,9 @@ function openEventForm(existing) {
   </div>
   <label class="check-row">已結清 <input type="checkbox" id="e-settled" ${ev.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="e-notes" rows="2">${esc(ev.notes)}</textarea>`)}
+  <div class="form-section">封面圖 <button class="btn line small" id="cover-pick">上傳照片</button></div>
+  <input type="file" id="cover-file" accept="image/*" style="display:none">
+  ${fieldHtml('圖片網址（上傳後自動填入，也可直接貼網址）', `<input id="e-coverUrl" value="${esc(ev.coverUrl)}">`)}
   ${isNew ? '' : `
   <div class="form-section">相關流水
     <span>
@@ -1537,9 +1538,50 @@ function openEventForm(existing) {
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'payer', 'notes'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
+    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'payer', 'notes', 'coverUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     ev.settled = $('#e-settled').checked;
   }
+  $('#cover-pick').onclick = () => $('#cover-file').click();
+  $('#e-coverUrl').onchange = () => {
+    const pv = $('#cover-preview');
+    pv.src = $('#e-coverUrl').value.trim();
+    pv.style.display = pv.src ? '' : 'none';
+  };
+  $('#cover-file').onchange = e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!CFG.apiUrl) { toast('要先在設定頁連接 Apps Script 才能上傳照片'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = async () => {
+        const scale = Math.min(1, 1200 / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        toast('封面上傳中…');
+        try {
+          const res = await apiPost({
+            action: 'uploadImage',
+            filename: 'cover-' + ev.id + '-' + Date.now() + '.jpg',
+            mimeType: 'image/jpeg',
+            dataBase64: canvas.toDataURL('image/jpeg', 0.85).split(',')[1],
+          });
+          $('#e-coverUrl').value = res.url;
+          const pv = $('#cover-preview');
+          pv.src = res.url;
+          pv.style.display = '';
+          toast('封面已上傳，記得按儲存活動');
+        } catch (err) {
+          toast('上傳失敗：' + err.message);
+        }
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(f);
+  };
   $('#event-save').onclick = () => {
     readEvent();
     saveEvent(ev);

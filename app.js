@@ -96,7 +96,7 @@ const NUMF = {
   sales: ['unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity'],
   events: ['ticketPriceTwd'],
   ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketCount'],
-  transfers: ['ticketCount', 'costTwd', 'amountTwd'],
+  transfers: ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd'],
 };
 const BOOLF = {
   orders: ['settled'],
@@ -1128,13 +1128,14 @@ function transfersHtml() {
     const seat = seatText({ ticketArea: t.ticketArea, ticketRow: t.ticketRow, ticketSeat: t.ticketSeat });
     return `<div class="card tappable" data-transfer="${esc(t.id)}">
       <div class="row-head">
-        <div class="row-title"><span class="badge accent">${esc(t.kind || '讓票')}</span> ${esc(ev ? eventTitle(ev) : (t.notes || '未指定活動'))}</div>
+        <div class="row-title"><span class="badge accent">${esc(t.kind || '讓票')}</span> ${esc(t.title || (ev ? eventTitle(ev) : (t.notes || '未指定活動')))}</div>
         ${num(t.amountTwd) ? `<div class="amount">${fmtInt(t.amountTwd)}</div>` : ''}
       </div>
       <div class="row-meta">
         <span>${esc(t.date || '')}</span>
         ${t.person ? `<span>對象 ${esc(t.person)}</span>` : ''}
         ${num(t.ticketCount) ? `<span>${fmtInt(t.ticketCount)} 張</span>` : ''}
+        ${num(t.feeTwd) ? `<span>手續費 ${fmtInt(t.feeTwd)}</span>` : ''}
         ${seat ? `<span>${esc(seat)}</span>` : ''}
       </div>
       <div style="margin-top:6px">${num(t.amountTwd) ? (t.settled ? '<span class="badge ok">已收款</span>' : '<span class="badge danger">未收款</span>') : ''}</div>
@@ -1621,7 +1622,6 @@ function openEventForm(existing) {
   <img id="cover-preview" class="cover-hero" src="${esc(ev.coverUrl)}" alt="" style="${ev.coverUrl ? '' : 'display:none'}">
   <datalist id="dl-artist">${datalistOptions(DB.events.map(x => x.artist))}</datalist>
   <datalist id="dl-type">${datalistOptions(DB.events.map(x => x.eventType).concat(['專場', '演唱會', '簽售', '見面會', '快閃店']))}</datalist>
-  <datalist id="dl-payer2">${datalistOptions(DB.events.map(x => x.payer).concat(DB.ledger.map(x => x.payer)))}</datalist>
   ${fieldHtml('活動名稱', `<input id="e-name" value="${esc(ev.name)}">`)}
   ${fieldHtml('表演者', `<input id="e-artist" list="dl-artist" value="${esc(ev.artist)}">`)}
   ${fieldHtml('活動日期', `<input id="e-startDate" type="date" value="${esc(ev.startDate)}">`)}
@@ -1636,10 +1636,7 @@ function openEventForm(existing) {
   </div>
   ${fieldHtml('系列場次', `<input id="e-seriesEvent" placeholder="例：NO.68" value="${esc(ev.seriesEvent)}">`)}
   ${num(ev.ticketPriceTwd) || ev.seat ? `<div class="hint">座位與票價由下方「相關流水」的票券彙整：${ev.seat ? esc(ev.seat) + '｜' : ''}${num(ev.ticketPriceTwd) ? fmtTwd(ev.ticketPriceTwd) : ''}</div>` : ''}
-  <div class="field-row">
-    ${fieldHtml('嘉賓', `<input id="e-guest" value="${esc(ev.guest)}">`)}
-    ${fieldHtml('付款人', `<input id="e-payer" list="dl-payer2" value="${esc(ev.payer)}">`)}
-  </div>
+  ${fieldHtml('嘉賓', `<input id="e-guest" value="${esc(ev.guest)}">`)}
   <label class="check-row">已結清 <input type="checkbox" id="e-settled" ${ev.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="e-notes" rows="2">${esc(ev.notes)}</textarea>`)}
   <div class="form-section">封面圖 <button class="btn line small" id="cover-pick">上傳照片</button></div>
@@ -1663,7 +1660,7 @@ function openEventForm(existing) {
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'payer', 'notes', 'coverUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
+    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'notes', 'coverUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     ev.settled = $('#e-settled').checked;
   }
   $('#cover-pick').onclick = () => $('#cover-file').click();
@@ -1727,7 +1724,7 @@ function openEventForm(existing) {
       saveEvent(ev);
       openLedgerForm(null, {
         category: b.dataset.addCat, eventId: ev.id, date: ev.startDate,
-        title: CAT_LABEL[b.dataset.addCat] + ' - ' + ev.name, payer: ev.payer,
+        title: CAT_LABEL[b.dataset.addCat] + ' - ' + ev.name,
       }, ev.id);
     });
     $$('[data-rel-ledger]').forEach(el => el.onclick = () => {
@@ -1808,10 +1805,10 @@ function openLedgerForm(existing, preset, backEventId) {
     ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
     <div class="field-row">
       ${fieldHtml('領票日（不填＝隨時可領）', `<input id="l-ticketPickupDate" type="date" value="${esc(l.ticketPickupDate)}">`)}
-      <div class="field" style="flex:0 0 108px"><label>&nbsp;</label>
-        <label class="check-row" style="padding:9px 0">已領票 <input type="checkbox" id="l-ticketPickedUp" ${toBool(l.ticketPickedUp) ? 'checked' : ''}></label>
-      </div>
+      ${fieldHtml('或開演前Ｎ天可領', `<input id="l-pickupDays" type="number" inputmode="numeric" placeholder="例：3">`)}
     </div>
+    <div class="hint" id="pickup-hint"></div>
+    <label class="check-row">已領票 <input type="checkbox" id="l-ticketPickedUp" ${toBool(l.ticketPickedUp) ? 'checked' : ''}></label>
     <div class="field-row">
       ${fieldHtml('區域（自己的座位）', `<input id="l-ticketArea" value="${esc(l.ticketArea)}">`)}
       ${fieldHtml('排', `<input id="l-ticketRow" value="${esc(l.ticketRow)}">`)}
@@ -1924,6 +1921,17 @@ function openLedgerForm(existing, preset, backEventId) {
     renderSplits();
     refresh();
   };
+  $('#l-pickupDays').addEventListener('input', () => {
+    const n = num($('#l-pickupDays').value);
+    const ev = DB.events.find(e => e.id === $('#l-eventId').value);
+    if (!n) { $('#pickup-hint').textContent = ''; return; }
+    if (!ev || !ev.startDate) { $('#pickup-hint').textContent = '⚠ 要先選有日期的活動才能換算'; return; }
+    const d = new Date(ev.startDate);
+    d.setDate(d.getDate() - n);
+    const iso = d.toISOString().slice(0, 10);
+    $('#l-ticketPickupDate').value = iso;
+    $('#pickup-hint').textContent = `開演前 ${n} 天 → 領票日 ${iso}`;
+  });
   $('#l-ticketCount').addEventListener('change', () => {
     readSplits();
     let sum = l.splits.reduce((s, x) => s + num(x.count), 0);
@@ -1997,8 +2005,8 @@ function deleteTransfer(t) {
 function openTransferForm(existing) {
   const isNew = !existing;
   const t = existing ? JSON.parse(JSON.stringify(existing)) : {
-    id: uid(), date: today(), eventId: '', kind: '讓票', person: '', ticketCount: 1,
-    ticketArea: '', ticketRow: '', ticketSeat: '', costTwd: '', amountTwd: '', settled: false, notes: '', createdAt: today(),
+    id: uid(), date: today(), eventId: '', kind: '讓票', person: '', ticketCount: 1, title: '',
+    ticketArea: '', ticketRow: '', ticketSeat: '', costTwd: '', amountTwd: '', feeTwd: '', settled: false, notes: '', createdAt: today(),
   };
   const evOpts = [['', '不指定活動']].concat(
     DB.events.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)))
@@ -2006,10 +2014,11 @@ function openTransferForm(existing) {
   const html = `
   ${sheetTitleHtml(isNew ? '新增讓票紀錄' : '編輯讓票紀錄', !isNew, 'transfer-del')}
   <div class="field-row">
-    ${fieldHtml('類型', `<input id="t-kind" list="dl-tkind" value="${esc(t.kind)}"><datalist id="dl-tkind"><option value="讓票"><option value="換票"><option value="轉賣"></datalist>`)}
+    ${fieldHtml('類型', `<input id="t-kind" list="dl-tkind" value="${esc(t.kind)}"><datalist id="dl-tkind"><option value="讓票"><option value="換票"><option value="轉賣"><option value="退票"></datalist>`)}
     ${fieldHtml('日期', `<input id="t-date" type="date" value="${esc(t.date)}">`)}
   </div>
-  <div class="field"><label>活動場次</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
+  ${fieldHtml('票券／活動名稱（沒有在活動清單也可以直接打字）', `<input id="t-title" value="${esc(t.title)}">`)}
+  <div class="field"><label>活動場次（選填）</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
   <div class="field-row">
     ${fieldHtml('對象', `<input id="t-person" list="dl-cp2" value="${esc(t.person)}">`)}
     ${fieldHtml('張數', `<input id="t-ticketCount" type="number" inputmode="numeric" value="${esc(t.ticketCount)}">`)}
@@ -2023,6 +2032,7 @@ function openTransferForm(existing) {
   <div class="field-row">
     ${fieldHtml('原始成本（選填）', `<input id="t-costTwd" type="number" inputmode="numeric" value="${esc(t.costTwd)}">`)}
     ${fieldHtml('收回金額', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
+    ${fieldHtml('退票手續費', `<input id="t-feeTwd" type="number" inputmode="numeric" value="${esc(t.feeTwd)}">`)}
   </div>
   <label class="check-row">已收款 <input type="checkbox" id="t-settled" ${t.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="t-notes" rows="2">${esc(t.notes)}</textarea>`)}
@@ -2032,10 +2042,10 @@ function openTransferForm(existing) {
   openSheet(html);
   $('#sh-close').onclick = closeSheet;
   $('#transfer-save').onclick = () => {
-    ['date', 'kind', 'person', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
+    ['date', 'kind', 'person', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
     t.eventId = $('#t-eventId').value;
     t.settled = $('#t-settled').checked;
-    ['ticketCount', 'costTwd', 'amountTwd'].forEach(k => {
+    ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd'].forEach(k => {
       const v = $('#t-' + k).value;
       t[k] = v === '' ? '' : num(v);
     });
@@ -2083,6 +2093,12 @@ function migrateTitles() {
 }
 
 /* ---------- 啟動 ---------- */
+// 關掉瀏覽器自動填入，才不會蓋掉網站自己的下拉選單
+new MutationObserver(muts => muts.forEach(m => m.addedNodes.forEach(n => {
+  if (n.nodeType !== 1) return;
+  if (n.matches('input')) n.setAttribute('autocomplete', 'off');
+  n.querySelectorAll('input').forEach(i => i.setAttribute('autocomplete', 'off'));
+}))).observe(document.body, { childList: true, subtree: true });
 $$('#tabbar button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
 $('#fab').onclick = () => {
   if (state.tab === 'orders') openOrderForm(null);

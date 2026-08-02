@@ -68,15 +68,15 @@ const splitTotal = l => {
   const sp = splitList(l);
   return sp.length ? sp.reduce((s, x) => s + num(x.amountTwd), 0) : num(l.expectedReceivableTwd);
 };
-// 我的份：名單有「我」就用我的列；沒設定我的名字時退回付款人視角（總額扣掉別人）
+// 我的份：名單有「我」就用我那列；名單沒有我，剩下沒分給別人的就是我的
+// （記在這裡的票都是自己的，就算是別人先付的錢）
 function ownShare(l) {
   const sp = splitList(l);
   if (sp.length) {
-    if (CFG.myName && sp.some(s => s.name === CFG.myName)) {
-      return sp.filter(s => s.name === CFG.myName).reduce((s, x) => s + num(x.amountTwd), 0);
-    }
-    if (CFG.myName && l.payer && l.payer !== CFG.myName) return 0;
-    return Math.max(0, num(l.amountTwd) - sp.filter(s => s.name !== l.payer).reduce((s, x) => s + num(x.amountTwd), 0));
+    const mine = sp.filter(s => CFG.myName && s.name === CFG.myName);
+    if (mine.length) return mine.reduce((s, x) => s + num(x.amountTwd), 0);
+    const others = sp.filter(s => s.name !== CFG.myName).reduce((s, x) => s + num(x.amountTwd), 0);
+    return Math.max(0, num(l.amountTwd) - others);
   }
   return Math.max(0, num(l.amountTwd) - num(l.expectedReceivableTwd));
 }
@@ -411,7 +411,17 @@ function copyEvent(src) {
   const copy = JSON.parse(JSON.stringify(src));
   copy.id = uid();
   copy.createdAt = today();
+  const entries = DB.ledger.filter(l => l.eventId === src.id).map(l => {
+    const c = JSON.parse(JSON.stringify(l));
+    c.id = uid();
+    c.eventId = copy.id;
+    c.createdAt = today();
+    splitList(c).forEach(s => { s.settled = false; });
+    return c;
+  });
+  DB.ledger.unshift(...entries);
   saveEvent(copy);
+  if (entries.length) pushOps([{ action: 'upsert', table: 'ledger', rows: ledgerOut(entries) }]);
   return copy;
 }
 function deleteEvent(ev) {
@@ -557,6 +567,13 @@ function renderHome(view) {
 
   view.innerHTML = `
   <div class="section-note" style="letter-spacing:.1em">${dateLine}</div>
+  ${CFG.myName ? '' : `<button class="group-head" style="margin-bottom:12px" data-goto="settings">
+    <span class="main" style="text-align:left;min-width:0">
+      <span class="row-title" style="display:block">先設定「我的名字」</span>
+      <span class="row-meta">分帳才知道哪一份是你的</span>
+    </span>
+    <span style="display:flex;align-items:center;gap:8px"><span class="badge accent">前往設定</span><span class="caret">›</span></span>
+  </button>`}
   <div class="stat-strip">
     <button class="stat" data-quick="order"><div class="n">＋</div><div class="l">新增訂單</div></button>
     <button class="stat" data-quick="event"><div class="n">＋</div><div class="l">新增活動</div></button>
@@ -925,9 +942,10 @@ function renderEvents(view) {
     e.stopPropagation();
     const src = DB.events.find(x => x.id === b.dataset.copyEvent);
     if (!src) return;
-    copyEvent(src);
+    const copy = copyEvent(src);
     render();
-    toast('已複製整場活動，可點進去修改');
+    const n = DB.ledger.filter(l => l.eventId === copy.id).length;
+    toast(n ? `已複製整場活動與 ${n} 筆流水` : '已複製整場活動');
   });
 }
 function eventListHtml() {
@@ -1072,8 +1090,16 @@ function splitHtml() {
     const sp = splitList(l);
     if (sp.length) {
       sp.forEach(s => { if (!s.settled) addOwe(s.name, l.payer, num(s.amountTwd), l); });
+      // 名單裡沒有我，但錢是別人先付的：我的份還是欠付款人
+      if (CFG.myName && l.payer !== CFG.myName && !sp.some(s => s.name === CFG.myName)) {
+        addOwe(CFG.myName, l.payer, ownShare(l), l);
+      }
     } else {
       addOwe(l.counterparty, l.payer, num(l.expectedReceivableTwd) - num(l.receivedTwd), l);
+      if (CFG.myName && l.payer && l.payer !== CFG.myName && l.counterparty !== CFG.myName
+        && entrySettle(l) !== 'settled') {
+        addOwe(CFG.myName, l.payer, ownShare(l), l);
+      }
     }
   });
   const done = {}, nets = [];
@@ -1802,17 +1828,20 @@ function openLedgerForm(existing, preset, backEventId) {
     </div>
     <datalist id="dl-tplatform">${datalistOptions(DB.ledger.map(x => x.ticketPlatform))}</datalist>
     <div class="hint" id="tk-hint"></div>
-    ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
-    <div class="field-row">
-      ${fieldHtml('領票日（不填＝隨時可領）', `<input id="l-ticketPickupDate" type="date" value="${esc(l.ticketPickupDate)}">`)}
-      ${fieldHtml('或開演前Ｎ天可領', `<input id="l-pickupDays" type="number" inputmode="numeric" placeholder="例：3">`)}
-    </div>
-    <div class="hint" id="pickup-hint"></div>
-    <label class="check-row">已領票 <input type="checkbox" id="l-ticketPickedUp" ${toBool(l.ticketPickedUp) ? 'checked' : ''}></label>
     <div class="field-row">
       ${fieldHtml('區域（自己的座位）', `<input id="l-ticketArea" value="${esc(l.ticketArea)}">`)}
       ${fieldHtml('排', `<input id="l-ticketRow" value="${esc(l.ticketRow)}">`)}
       ${fieldHtml('座號', `<input id="l-ticketSeat" value="${esc(l.ticketSeat)}">`)}
+    </div>
+    <label class="check-row">填寫購票帳號與領票資訊 <input type="checkbox" id="l-more-toggle" ${l.ticketAccount || l.ticketPickupDate ? 'checked' : ''}></label>
+    <div id="ticket-more" style="${l.ticketAccount || l.ticketPickupDate ? '' : 'display:none'}">
+      ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
+      <div class="field-row">
+        ${fieldHtml('領票日（不填＝隨時可領）', `<input id="l-ticketPickupDate" type="date" value="${esc(l.ticketPickupDate)}">`)}
+        ${fieldHtml('或開演前Ｎ天可領', `<input id="l-pickupDays" type="number" inputmode="numeric" placeholder="例：3">`)}
+      </div>
+      <div class="hint" id="pickup-hint"></div>
+      <label class="check-row">已領票 <input type="checkbox" id="l-ticketPickedUp" ${toBool(l.ticketPickedUp) ? 'checked' : ''}></label>
     </div>
   </div>
 
@@ -1832,8 +1861,15 @@ function openLedgerForm(existing, preset, backEventId) {
     ${fieldHtml('匯率', `<input id="l-exchangeRate" type="number" step="any" inputmode="decimal" value="${esc(l.exchangeRate)}">`)}
   </div>
 
-  <div class="form-section">在場的人怎麼分 <button class="btn line small" id="add-split">＋ 加一個人</button></div>
-  <div class="hint">名單包含自己。付款人不用還錢；其他人給錢後勾「已給款」。只有自己一人＝單純個人花費。</div>
+  <div class="form-section">在場的人怎麼分
+    <span style="display:flex;gap:8px">
+      <button class="btn line small" id="even-split">平分</button>
+      <button class="btn line small" id="add-split">＋ 加一個人</button>
+    </span>
+  </div>
+  <div class="hint">${CFG.myName
+    ? `這本帳的主人是「${esc(CFG.myName)}」。加人時金額自動平分（總金額÷人數），可以再手動改。`
+    : '⚠ 還沒設定「我的名字」，請到設定頁填寫，系統才知道哪一份是你的。'}</div>
   <datalist id="dl-cp">${datalistOptions(peopleList())}</datalist>
   <div id="splits-wrap">${l.splits.map(splitRow).join('')}</div>
   <div class="hint" id="own-hint"></div>
@@ -1908,12 +1944,27 @@ function openLedgerForm(existing, preset, backEventId) {
   refresh();
   $('#sheet').oninput = refresh;
 
+  function evenSplit() {
+    const total = num($('#l-amountTwd').value);
+    const n = l.splits.length;
+    if (!total || !n) return;
+    const each = Math.round(total / n);
+    l.splits.forEach((s, i) => { s.amountTwd = i === 0 ? total - each * (n - 1) : each; });
+  }
   $('#add-split').onclick = () => {
     readSplits();
-    const ticket = catNow() === 'ticket';
-    l.splits.push({ name: '', count: ticket ? 1 : '', amountTwd: ticket ? perTicket() || '' : '', settled: false });
+    l.splits.push({ name: '', count: catNow() === 'ticket' ? 1 : '', amountTwd: '', settled: false });
+    evenSplit();
     renderSplits();
     refresh();
+  };
+  $('#even-split').onclick = () => {
+    readSplits();
+    l.splits.forEach(s => { s.count = ''; }); // 手動平分後就不再依張數回算
+    evenSplit();
+    renderSplits();
+    refresh();
+    toast('已平分金額');
   };
   $('#l-category').onchange = () => {
     $('#ticket-wrap').style.display = catNow() === 'ticket' ? '' : 'none';
@@ -1945,6 +1996,9 @@ function openLedgerForm(existing, preset, backEventId) {
   $('#l-payer').onchange = () => { readSplits(); renderSplits(); refresh(); };
   $('#l-fx-toggle').onchange = () => {
     $('#fx-row').style.display = $('#l-fx-toggle').checked ? '' : 'none';
+  };
+  $('#l-more-toggle').onchange = () => {
+    $('#ticket-more').style.display = $('#l-more-toggle').checked ? '' : 'none';
   };
   $('#l-eventId').onchange = () => {
     const ev = DB.events.find(e => e.id === $('#l-eventId').value);

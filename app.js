@@ -441,7 +441,7 @@ function syncEventFromTickets(eventId) {
   const ev = DB.events.find(e => e.id === eventId);
   if (!ev) return null;
   const tickets = DB.ledger.filter(l => l.eventId === eventId && l.category === 'ticket');
-  if (!tickets.length) return null;
+  if (!tickets.length) { ev.ticketPriceTwd = 0; return ev; }
   ev.ticketPriceTwd = tickets.reduce((s, l) => s + ownShare(l), 0);
   const seats = tickets.map(seatText).filter(Boolean);
   if (seats.length) ev.seat = seats.join(' ');
@@ -1877,6 +1877,7 @@ function openLedgerForm(existing, preset, backEventId) {
   ${fieldHtml('備註', `<textarea id="l-notes" rows="2">${esc(l.notes)}</textarea>`)}
   <div class="sheet-actions">
     <button class="btn primary" id="ledger-save">儲存流水</button>
+    ${isNew ? '' : '<button class="btn line" id="to-transfer">改成讓票紀錄</button>'}
   </div>`;
 
   openSheet(html);
@@ -2040,6 +2041,15 @@ function openLedgerForm(existing, preset, backEventId) {
       toast('流水已刪除');
       if (backEventId) goBack(); else closeSheet();
     };
+    $('#to-transfer').onclick = () => {
+      if (!confirm('把這筆改成讓票紀錄？資料會搬到「讓票」分頁，不再算進自己的花費。')) return;
+      const t = ledgerToTransfer(l);
+      state.tab = 'ledger';
+      state.lgSeg = 'transfer';
+      render(true);
+      toast('已改成讓票紀錄');
+      openTransferForm(t);
+    };
   }
 }
 
@@ -2056,6 +2066,40 @@ function deleteTransfer(t) {
   saveDB();
   pushOps([{ action: 'delete', table: 'transfers', ids: [t.id] }]);
 }
+// 流水（我要去的票）↔ 讓票（要轉出去的票）互轉，資料跟著搬過去
+function ledgerToTransfer(l) {
+  const ev = DB.events.find(e => e.id === l.eventId);
+  const others = splitList(l).filter(s => s.name !== CFG.myName);
+  const t = {
+    id: uid(), date: l.date || today(), eventId: l.eventId || '', kind: '讓票',
+    person: others.length ? others[0].name : (l.counterparty || ''),
+    title: l.title || (ev ? eventTitle(ev) : ''),
+    ticketCount: num(l.ticketCount) || 1,
+    ticketArea: l.ticketArea, ticketRow: l.ticketRow, ticketSeat: l.ticketSeat,
+    costTwd: num(l.amountTwd) || '', amountTwd: '', feeTwd: '', settled: false,
+    notes: l.notes, createdAt: today(),
+  };
+  saveTransfer(t);
+  deleteLedger(l);
+  return t;
+}
+function transferToLedger(t) {
+  const ev = DB.events.find(e => e.id === t.eventId);
+  const l = {
+    id: uid(), type: 'expense', category: 'ticket', date: t.date || today(),
+    eventId: t.eventId || '', title: t.title || (ev ? '票券 - ' + ev.name : '票券'),
+    amountTwd: num(t.costTwd) || num(t.amountTwd) || '', currency: '', originalAmount: '', exchangeRate: '',
+    payer: CFG.myName || '', paymentMethod: '', paymentDetail: '',
+    counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '',
+    notes: t.notes, ticketType: '', ticketArea: t.ticketArea, ticketRow: t.ticketRow, ticketSeat: t.ticketSeat,
+    attendee: '', ticketStatus: '', ticketFaceTwd: '', ticketBenefitTwd: '', ticketFeeTwd: '',
+    ticketPlatform: '', ticketAccount: '', ticketCount: num(t.ticketCount) || 1,
+    splits: [], ticketPickupDate: '', ticketPickedUp: false, createdAt: today(),
+  };
+  saveLedger(l);
+  deleteTransfer(t);
+  return l;
+}
 function openTransferForm(existing) {
   const isNew = !existing;
   const t = existing ? JSON.parse(JSON.stringify(existing)) : {
@@ -2071,8 +2115,8 @@ function openTransferForm(existing) {
     ${fieldHtml('類型', `<input id="t-kind" list="dl-tkind" value="${esc(t.kind)}"><datalist id="dl-tkind"><option value="讓票"><option value="換票"><option value="轉賣"><option value="退票"></datalist>`)}
     ${fieldHtml('日期', `<input id="t-date" type="date" value="${esc(t.date)}">`)}
   </div>
-  ${fieldHtml('票券／活動名稱（沒有在活動清單也可以直接打字）', `<input id="t-title" value="${esc(t.title)}">`)}
-  <div class="field"><label>活動場次（選填）</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
+  ${fieldHtml('票券／活動名稱', `<input id="t-title" placeholder="直接打字即可，不用在活動清單裡" value="${esc(t.title)}">`)}
+  <div class="field"><label>連結活動場次（選填，自己沒要去的票可以不用選）</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
   <div class="field-row">
     ${fieldHtml('對象', `<input id="t-person" list="dl-cp2" value="${esc(t.person)}">`)}
     ${fieldHtml('張數', `<input id="t-ticketCount" type="number" inputmode="numeric" value="${esc(t.ticketCount)}">`)}
@@ -2092,9 +2136,16 @@ function openTransferForm(existing) {
   ${fieldHtml('備註', `<textarea id="t-notes" rows="2">${esc(t.notes)}</textarea>`)}
   <div class="sheet-actions">
     <button class="btn primary" id="transfer-save">儲存紀錄</button>
+    ${isNew ? '' : '<button class="btn line" id="to-ledger">改成我自己的流水</button>'}
   </div>`;
   openSheet(html);
   $('#sh-close').onclick = closeSheet;
+  $('#t-eventId').onchange = () => {
+    const ev = DB.events.find(e => e.id === $('#t-eventId').value);
+    if (!ev) return;
+    if (ev.startDate) $('#t-date').value = ev.startDate;
+    if (!$('#t-title').value.trim()) $('#t-title').value = ev.name;
+  };
   $('#transfer-save').onclick = () => {
     ['date', 'kind', 'person', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
     t.eventId = $('#t-eventId').value;
@@ -2115,6 +2166,14 @@ function openTransferForm(existing) {
       closeSheet();
       render();
       toast('已刪除');
+    };
+    $('#to-ledger').onclick = () => {
+      if (!confirm('把這筆改回自己的票券流水？資料會搬到「流水」分頁。')) return;
+      const l = transferToLedger(t);
+      state.lgSeg = 'flow';
+      render(true);
+      toast('已改成自己的流水');
+      openLedgerForm(l);
     };
   }
 }

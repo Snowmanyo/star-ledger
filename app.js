@@ -1159,12 +1159,14 @@ function transfersHtml() {
       </div>
       <div class="row-meta">
         <span>${esc(t.date || '')}</span>
-        ${t.person ? `<span>對象 ${esc(t.person)}</span>` : ''}
+        ${t.person ? `<span>讓給 ${esc(t.person)}</span>` : ''}
         ${num(t.ticketCount) ? `<span>${fmtInt(t.ticketCount)} 張</span>` : ''}
         ${num(t.feeTwd) ? `<span>手續費 ${fmtInt(t.feeTwd)}</span>` : ''}
         ${seat ? `<span>${esc(seat)}</span>` : ''}
       </div>
-      <div style="margin-top:6px">${num(t.amountTwd) ? (t.settled ? '<span class="badge ok">已收款</span>' : '<span class="badge danger">未收款</span>') : ''}</div>
+      <div style="margin-top:6px">${num(t.amountTwd)
+        ? (t.settled ? '<span class="badge ok">已收款</span>' : '<span class="badge danger">未收款</span>')
+        : '<span class="badge warn">未填金額</span>'}</div>
     </div>`;
   }).join('');
   return html;
@@ -2076,7 +2078,7 @@ function ledgerToTransfer(l) {
     title: l.title || (ev ? eventTitle(ev) : ''),
     ticketCount: num(l.ticketCount) || 1,
     ticketArea: l.ticketArea, ticketRow: l.ticketRow, ticketSeat: l.ticketSeat,
-    costTwd: num(l.amountTwd) || '', amountTwd: '', feeTwd: '', settled: false,
+    costTwd: num(l.amountTwd) || '', amountTwd: num(l.amountTwd) || '', feeTwd: '', settled: false,
     notes: l.notes, createdAt: today(),
   };
   saveTransfer(t);
@@ -2118,7 +2120,7 @@ function openTransferForm(existing) {
   ${fieldHtml('票券／活動名稱', `<input id="t-title" placeholder="直接打字即可，不用在活動清單裡" value="${esc(t.title)}">`)}
   <div class="field"><label>連結活動場次（選填，自己沒要去的票可以不用選）</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
   <div class="field-row">
-    ${fieldHtml('對象', `<input id="t-person" list="dl-cp2" value="${esc(t.person)}">`)}
+    ${fieldHtml('讓給誰（對方）', `<input id="t-person" list="dl-cp2" value="${esc(t.person)}">`)}
     ${fieldHtml('張數', `<input id="t-ticketCount" type="number" inputmode="numeric" value="${esc(t.ticketCount)}">`)}
   </div>
   <datalist id="dl-cp2">${datalistOptions(peopleList().concat((DB.transfers || []).map(x => x.person)))}</datalist>
@@ -2128,10 +2130,11 @@ function openTransferForm(existing) {
     ${fieldHtml('座號', `<input id="t-ticketSeat" value="${esc(t.ticketSeat)}">`)}
   </div>
   <div class="field-row">
-    ${fieldHtml('原始成本（選填）', `<input id="t-costTwd" type="number" inputmode="numeric" value="${esc(t.costTwd)}">`)}
-    ${fieldHtml('收回金額', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
+    ${fieldHtml('我原本花了多少', `<input id="t-costTwd" type="number" inputmode="numeric" value="${esc(t.costTwd)}">`)}
+    ${fieldHtml('對方要付我多少', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
     ${fieldHtml('退票手續費', `<input id="t-feeTwd" type="number" inputmode="numeric" value="${esc(t.feeTwd)}">`)}
   </div>
+  <div class="hint" id="t-hint"></div>
   <label class="check-row">已收款 <input type="checkbox" id="t-settled" ${t.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="t-notes" rows="2">${esc(t.notes)}</textarea>`)}
   <div class="sheet-actions">
@@ -2146,6 +2149,20 @@ function openTransferForm(existing) {
     if (ev.startDate) $('#t-date').value = ev.startDate;
     if (!$('#t-title').value.trim()) $('#t-title').value = ev.name;
   };
+  $('#t-costTwd').addEventListener('input', () => {
+    const a = $('#t-amountTwd');
+    if (!a.value.trim()) a.value = $('#t-costTwd').value; // 預設原價讓出，可自行改
+    refreshTHint();
+  });
+  ['t-amountTwd', 't-feeTwd', 't-settled'].forEach(id => $('#' + id).addEventListener('input', refreshTHint));
+  function refreshTHint() {
+    const got = num($('#t-amountTwd').value), cost = num($('#t-costTwd').value), fee = num($('#t-feeTwd').value);
+    if (!got && !cost) { $('#t-hint').textContent = '「對方要付我多少」沒填的話，未收金額不會被算進去'; return; }
+    const net = got - cost - fee;
+    $('#t-hint').textContent = `${$('#t-settled').checked ? '已收' : '待收'} ${fmtTwd(got)}`
+      + (cost || fee ? `｜和成本相比 ${net >= 0 ? '+' : ''}${fmtInt(net)}` : '');
+  }
+  refreshTHint();
   $('#transfer-save').onclick = () => {
     ['date', 'kind', 'person', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
     t.eventId = $('#t-eventId').value;

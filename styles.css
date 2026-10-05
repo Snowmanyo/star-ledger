@@ -354,3 +354,38 @@ main { padding: 4px 18px 28px; }
 .qty-step .q { min-width: 34px; text-align: center; font-family: var(--serif); font-weight: 600; }
 .divider { height: 1px; background: var(--line); margin: 18px 0; }
 a { color: var(--accent); }
+
+/* ---------- 掃票 ---------- */
+.scan-hero {
+  text-align: center; padding: 28px 20px 22px; margin: 4px 0 16px;
+  background: var(--card); border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 20px; transition: background .2s, border-color .2s;
+}
+.scan-hero.drag { background: var(--soft); border-color: var(--accent); }
+.scan-eyebrow { font-size: 10.5px; letter-spacing: .28em; color: var(--accent); }
+.scan-title { font-family: var(--serif); font-size: 22px; font-weight: 600; margin: 6px 0 2px; }
+.scan-sub { font-size: 12px; color: var(--muted); }
+.scan-btn { width: auto; display: inline-block; padding: 12px 34px; margin: 16px 0 10px; border-radius: 999px; }
+@media (hover: none) { .scan-desktop { display: none; } }
+.scan-draft { margin-bottom: 16px; }
+.scan-draft .btn-row .btn { flex: 0 0 auto; }
+
+.scan-thumbs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 10px; }
+.scan-thumbs img { height: 112px; border-radius: 10px; border: 1px solid var(--line); flex: 0 0 auto; }
+.scan-status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin: 2px 0 12px; }
+.scan-status.ok { color: var(--ok); }
+.scan-status.err { color: var(--danger); }
+.scan-spin {
+  width: 14px; height: 14px; border-radius: 50%; flex: 0 0 auto;
+  border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .9s linear infinite;
+}
+.scan-q { padding: 14px 0 6px; border-top: 1px solid var(--line); }
+.scan-q-title { font-weight: 500; font-size: 14px; margin-bottom: 10px; }
+.scan-q-sub { font-size: 12px; color: var(--muted); margin: 12px 0 8px; }
+.scan-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.field > label em { display: none; font-style: normal; color: var(--warn); margin-left: 6px; letter-spacing: 0; }
+.field.unsure > label em { display: inline; }
+.field.unsure input, .field.unsure select { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--card)); }
+.scan-done { text-align: center; padding: 26px 0 0; }
+.scan-done .glyph { font-size: 34px; color: var(--accent); }
+.scan-done-title { font-family: var(--serif); font-size: 20px; font-weight: 600; margin: 6px 0 4px; }

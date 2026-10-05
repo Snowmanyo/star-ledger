@@ -2,7 +2,12 @@
 // 部署方式：擴充功能 → Apps Script → 貼上本檔 → 部署 → 新增部署作業 → 網頁應用程式
 // 「執行身分：我」、「誰可以存取：知道連結的任何人」→ 複製網頁應用程式網址貼到 App 設定頁。
 
-const SHARED_KEY = ''; // 可自訂一組密碼，App 設定頁需填相同的值；留空表示不驗證
+// 共用密碼與 Gemini 金鑰放在「專案設定 → 指令碼屬性」，不要寫在程式裡（這份程式碼是公開的）：
+//   SHARED_KEY      共用密碼，App 設定頁需填相同的值；不設表示不驗證
+//   GEMINI_API_KEY  Google AI Studio 申請的金鑰，掃票讀圖用
+const PROPS = PropertiesService.getScriptProperties();
+const SHARED_KEY = PROPS.getProperty('SHARED_KEY') || '';
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']; // 第一個額度用完或忙線時改用下一個
 const SHEET_ID = ''; // 從試算表「擴充功能→Apps Script」開的專案留空；獨立專案填試算表網址 /d/ 後面那串 ID
 
 function ss_() {
@@ -13,8 +18,8 @@ const TABLES = {
   orders: ['id', 'orderNumber', 'channel', 'orderDate', 'estimatedShipDate', 'actualShipDate', 'currency', 'domesticShipping', 'internationalShippingTwd', 'internationalShippingRateTwdPerKg', 'discountAmount', 'weightGrams', 'exchangeRate', 'chargedTwd', 'payer', 'paymentMethod', 'paymentDetail', 'settled', 'notes'],
   items: ['id', 'orderId', 'name', 'variant', 'unitPrice', 'quantity', 'ownership', 'proxyFor', 'arrived', 'sorted', 'proxyPaid', 'salePriceTwd', 'soldQuantity'],
   sales: ['id', 'sourceOrderId', 'sourceItemId', 'sourceOrderNumber', 'sourceChannel', 'name', 'variant', 'sourceCurrency', 'unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity', 'managedByOwnership', 'createdAt'],
-  events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt', 'coverUrl'],
-  ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt', 'settled', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketPlatform', 'ticketAccount', 'ticketCount', 'splits', 'ticketPickupDate', 'ticketPickedUp'],
+  events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt', 'coverUrl', 'startTime'],
+  ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt', 'settled', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketPlatform', 'ticketAccount', 'ticketCount', 'splits', 'ticketPickupDate', 'ticketPickedUp', 'ticketOrderNumber'],
   transfers: ['id', 'date', 'eventId', 'kind', 'person', 'ticketCount', 'ticketArea', 'ticketRow', 'ticketSeat', 'costTwd', 'amountTwd', 'settled', 'notes', 'createdAt', 'title', 'feeTwd'],
 };
 
@@ -26,7 +31,7 @@ function setup_() {
     const cols = TABLES[name];
     const first = sheet.getRange(1, 1, 1, cols.length).getValues()[0];
     if (cols.some(function (c, i) { return String(first[i]) !== c; })) {
-      sheet.getRange('A:Z').setNumberFormat('@'); // 全文字格式，避免長訂單編號被轉成數字失去精度
+      sheet.getRange(1, 1, sheet.getMaxRows(), cols.length).setNumberFormat('@'); // 全文字格式，避免長訂單編號被轉成數字失去精度
       sheet.getRange(1, 1, 1, cols.length).setValues([cols]).setFontWeight('bold');
       sheet.setFrozenRows(1);
     }
@@ -102,6 +107,71 @@ function uploadImage_(req) {
   return { ok: true, url: 'https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w1600' };
 }
 
+const SCAN_PROMPT = [
+  '你是購票訂單截圖的資料擷取助手。圖片是同一筆演唱會／活動購票訂單的一張或多張截圖，請合併讀取，只輸出 JSON。',
+  '規則：',
+  '- 看不到或無法判斷的欄位填空字串或 0，不要猜。',
+  '- date 用 YYYY-MM-DD；截圖沒寫年份時，用今天（{TODAY}）之後最近的那一天推算。time 用 24 小時制 HH:MM。',
+  '- eventName 用截圖上的活動名稱原文；artist 是表演者。city 是城市（例：台北、首爾），venue 是場館。',
+  '- currency 用 TWD、KRW、JPY、USD 其中之一。unitFace 是單張票面價，unitFee 是單張手續費（只有總手續費就除以張數），totalPaid 是這筆訂單實際付款總額。數字不要千分位逗號。',
+  '- seats 每張票一筆：area 區域、row 排、seat 座號（只填數字或代號，不要加「排」「號」）。ticketCount 是張數。',
+  '- platform 是售票平台，符合以下其一就用這個寫法：拓元、KKTIX、ibon、年代、寬宏、遠大、NOL、Melon、YES24；Interpark 也寫 NOL；都不是就寫看到的名稱。',
+  '- account 是購買人的帳號、姓名、信箱或電話（截圖上看得到才填）。orderNumber 是訂單編號。pickupDate 是可取票日期（YYYY-MM-DD）。',
+  '- uncertain 列出你沒把握的欄位名稱。',
+].join('\n');
+
+const SCAN_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    eventName: { type: 'STRING' }, artist: { type: 'STRING' },
+    date: { type: 'STRING' }, time: { type: 'STRING' },
+    city: { type: 'STRING' }, venue: { type: 'STRING' },
+    ticketType: { type: 'STRING' }, ticketCount: { type: 'NUMBER' },
+    seats: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      area: { type: 'STRING' }, row: { type: 'STRING' }, seat: { type: 'STRING' } } } },
+    currency: { type: 'STRING' }, unitFace: { type: 'NUMBER' }, unitFee: { type: 'NUMBER' }, totalPaid: { type: 'NUMBER' },
+    platform: { type: 'STRING' }, account: { type: 'STRING' },
+    orderNumber: { type: 'STRING' }, pickupDate: { type: 'STRING' },
+    uncertain: { type: 'ARRAY', items: { type: 'STRING' } },
+  },
+  required: ['eventName', 'date', 'seats', 'currency', 'totalPaid', 'ticketCount'],
+};
+
+function scanTicket_(req) {
+  if (req.test === 'quota') return { error: '今天的 AI 免費次數用完了（這是模擬測試），可以明天再試，或先手動填寫' };
+  const apiKey = PROPS.getProperty('GEMINI_API_KEY');
+  if (!apiKey) return { error: '還沒設定 Gemini 金鑰：請到 Apps Script「專案設定 → 指令碼屬性」新增 GEMINI_API_KEY' };
+  const today = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd');
+  const parts = [{ text: SCAN_PROMPT.replace('{TODAY}', today) }];
+  (req.images || []).forEach(function (img) {
+    parts.push({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.dataBase64 } });
+  });
+  const body = JSON.stringify({
+    contents: [{ parts: parts }],
+    generationConfig: { responseMimeType: 'application/json', responseSchema: SCAN_SCHEMA, temperature: 0 },
+  });
+  let lastCode = 0;
+  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODELS[i] + ':generateContent', {
+      method: 'post', contentType: 'application/json', payload: body,
+      headers: { 'x-goog-api-key': apiKey }, muteHttpExceptions: true,
+    });
+    lastCode = res.getResponseCode();
+    if (lastCode === 200) {
+      const out = JSON.parse(res.getContentText());
+      const cand = (out.candidates || [])[0];
+      const text = cand && cand.content ? cand.content.parts.filter(function (p) { return p.text && !p.thought; })
+        .map(function (p) { return p.text; }).join('') : '';
+      if (!text) return { error: 'AI 沒有讀出內容，請換一張清楚的截圖或手動填寫' };
+      return { ok: true, model: GEMINI_MODELS[i], data: JSON.parse(text) };
+    }
+    if (lastCode === 400 || lastCode === 401 || lastCode === 403) break; // 金鑰或請求有問題，換模型也沒用
+  }
+  if (lastCode === 429) return { error: '今天的 AI 免費次數用完了，可以明天再試，或先手動填寫' };
+  if (lastCode === 400 || lastCode === 401 || lastCode === 403) return { error: 'Gemini 金鑰無效或沒有權限（代碼 ' + lastCode + '），請確認指令碼屬性 GEMINI_API_KEY' };
+  return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '），請稍後再試或手動填寫' };
+}
+
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -121,6 +191,7 @@ function doGet(e) {
 function doPost(e) {
   const req = JSON.parse(e.postData.contents);
   if (!checkKey_(req.key)) return json_({ error: 'bad key' });
+  if (req.action === 'scanTicket') return json_(scanTicket_(req)); // 不寫試算表，不用排隊
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {

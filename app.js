@@ -210,15 +210,17 @@ async function doSync(silent) {
   }
 }
 async function pushOps(ops) {
-  if (!CFG.apiUrl) { markDirty(); return; }
+  if (!CFG.apiUrl) { markDirty(); return false; }
   setSyncIcon('spin');
   try {
     for (const op of ops) await apiPost(op);
     setSyncIcon('ok');
+    return true;
   } catch (err) {
     markDirty();
     setSyncIcon('err');
     toast('上傳失敗，資料已存在本機：' + err.message);
+    return false;
   } finally {
     setTimeout(() => setSyncIcon(''), 2500);
   }
@@ -405,7 +407,7 @@ function saveEvent(ev) {
   const changed = renumberEvents();
   if (!changed.some(e => e.id === ev.id)) changed.push(ev);
   saveDB();
-  pushOps([{ action: 'upsert', table: 'events', rows: changed }]);
+  return pushOps([{ action: 'upsert', table: 'events', rows: changed }]);
 }
 function copyEvent(src) {
   const copy = JSON.parse(JSON.stringify(src));
@@ -456,7 +458,7 @@ function saveLedger(entry) {
     if (ev) ops.push({ action: 'upsert', table: 'events', rows: [ev] });
   }
   saveDB();
-  pushOps(ops);
+  return pushOps(ops);
 }
 function deleteLedger(entry) {
   DB.ledger = DB.ledger.filter(l => l.id !== entry.id);
@@ -501,7 +503,6 @@ const settleBadge = s => s === 'settled' ? '<span class="badge ok">已結清</sp
 /* ---------- 畫面 ---------- */
 const state = { tab: 'home', seg: 'list', search: '', evSearch: '', cat: '', settle: '', openGroups: {}, oSearch: '', oChannel: '', oPayer: '', oStatus: '', evSeg: 'list', statYear: '', lgSeg: 'flow' };
 const savedUi = JSON.parse(localStorage.getItem('sl-ui') || '{}');
-if (TAB_TITLE[savedUi.tab]) state.tab = savedUi.tab;
 if (savedUi.seg) state.seg = savedUi.seg;
 if (savedUi.evSeg) state.evSeg = savedUi.evSeg;
 
@@ -565,7 +566,7 @@ function renderHome(view) {
     return !ev || String(ev.startDate || '9999') >= t;
   });
 
-  view.innerHTML = `
+  view.innerHTML = scanHeroHtml() + `
   <div class="section-note" style="letter-spacing:.1em">${dateLine}</div>
   ${CFG.myName ? '' : `<button class="group-head" style="margin-bottom:12px" data-goto="settings">
     <span class="main" style="text-align:left;min-width:0">
@@ -620,6 +621,7 @@ function renderHome(view) {
     <span style="display:flex;align-items:center;gap:8px"><span class="badge accent">前往設定</span><span class="caret">›</span></span>
   </button>` : ''}`;
 
+  bindScanHero(view);
   $$('[data-quick]', view).forEach(b => b.onclick = () => {
     if (b.dataset.quick === 'order') openOrderForm(null);
     else if (b.dataset.quick === 'event') openEventForm(null);
@@ -980,7 +982,7 @@ function eventListHtml() {
           <div class="amount">${fmtInt(e.ticketPriceTwd)}</div>
         </div>
         <div class="row-meta">
-          <span>${esc(e.startDate || '—')}</span>
+          <span>${esc(e.startDate || '—')}${e.startTime ? ' ' + esc(e.startTime) : ''}</span>
           ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
           ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
         </div>
@@ -1301,7 +1303,7 @@ function renderSettings(view) {
 
   <div class="form-section">雲端同步</div>
   <div class="field"><label>APPS SCRIPT 網址</label><input id="cfg-api" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(CFG.apiUrl)}"></div>
-  <div class="field"><label>金鑰（選填，需與 Code.gs 的 SHARED_KEY 一致）</label><input id="cfg-key" value="${esc(CFG.key)}"></div>
+  <div class="field"><label>共用密碼（與 Apps Script 指令碼屬性 SHARED_KEY 相同）</label><input id="cfg-key" value="${esc(CFG.key)}"></div>
   <div class="field"><label>GOOGLE 試算表網址（選填，方便快速開啟）</label><input id="cfg-sheet" placeholder="https://docs.google.com/spreadsheets/d/…" value="${esc(CFG.sheetUrl)}"></div>
   <div class="btn-row">
     <button class="btn line" id="cfg-save">儲存並測試連線</button>
@@ -1318,6 +1320,7 @@ function renderSettings(view) {
   <button class="btn line" id="btn-export">匯出 JSON 備份</button>
   <button class="btn line" id="btn-import">匯入 JSON 備份</button>
   <input type="file" id="import-file" accept=".json,application/json" style="display:none">
+  <button class="btn line" id="btn-test-quota">測試：模擬 AI 免費次數用完</button>
   <div class="section-note">目前資料：訂單 ${c.orders.length}｜品項 ${itemCount}｜販售 ${c.sales.length}｜活動 ${c.events.length}｜流水 ${c.ledger.length}</div>
   <div class="divider"></div>
   <div class="section-note" style="text-align:center">STAR LEDGER ✦ 追星總帳<br>資料儲存於你的 Google 試算表</div>`;
@@ -1351,6 +1354,7 @@ function renderSettings(view) {
   $('#btn-upload-all').onclick = () => {
     if (confirm('會以本機資料覆蓋試算表全部內容，確定上傳？')) uploadAll();
   };
+  $('#btn-test-quota').onclick = () => { scanTestQuota = true; toast('下一次掃票會模擬「次數用完」'); };
   $('#btn-export').onclick = () => {
     const blob = new Blob([JSON.stringify(Object.assign({ app: 'Fan Ledger', version: 7 }, DB), null, 1)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -1631,7 +1635,7 @@ function openOrderForm(existing) {
 function openEventForm(existing) {
   const isNew = !existing;
   const ev = existing ? JSON.parse(JSON.stringify(existing)) : {
-    id: uid(), name: '', artist: '', city: '', venue: '', startDate: today(), endDate: '',
+    id: uid(), name: '', artist: '', city: '', venue: '', startDate: today(), startTime: '', endDate: '',
     eventNumber: '', originalDate: '', eventType: '', liveTour: '', seriesEvent: '',
     seat: '', ticketPriceTwd: '', guest: '', payer: '', settled: false, notes: '', createdAt: today(), coverUrl: '',
   };
@@ -1652,7 +1656,10 @@ function openEventForm(existing) {
   <datalist id="dl-type">${datalistOptions(DB.events.map(x => x.eventType).concat(['專場', '演唱會', '簽售', '見面會', '快閃店']))}</datalist>
   ${fieldHtml('活動名稱', `<input id="e-name" value="${esc(ev.name)}">`)}
   ${fieldHtml('表演者', `<input id="e-artist" list="dl-artist" value="${esc(ev.artist)}">`)}
-  ${fieldHtml('活動日期', `<input id="e-startDate" type="date" value="${esc(ev.startDate)}">`)}
+  <div class="field-row">
+    ${fieldHtml('活動日期', `<input id="e-startDate" type="date" value="${esc(ev.startDate)}">`)}
+    ${fieldHtml('開演時間', `<input id="e-startTime" type="time" value="${esc(ev.startTime || '')}">`)}
+  </div>
   <div class="hint">場次編號會依活動日期自動編排</div>
   <div class="field-row">
     ${fieldHtml('城市', `<input id="e-city" value="${esc(ev.city)}">`)}
@@ -1688,7 +1695,7 @@ function openEventForm(existing) {
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'startDate', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'notes', 'coverUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
+    ['name', 'artist', 'startDate', 'startTime', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'notes', 'coverUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     ev.settled = $('#e-settled').checked;
   }
   $('#cover-pick').onclick = () => $('#cover-file').click();
@@ -1835,9 +1842,12 @@ function openLedgerForm(existing, preset, backEventId) {
       ${fieldHtml('排', `<input id="l-ticketRow" value="${esc(l.ticketRow)}">`)}
       ${fieldHtml('座號', `<input id="l-ticketSeat" value="${esc(l.ticketSeat)}">`)}
     </div>
-    <label class="check-row">填寫購票帳號與領票資訊 <input type="checkbox" id="l-more-toggle" ${l.ticketAccount || l.ticketPickupDate ? 'checked' : ''}></label>
-    <div id="ticket-more" style="${l.ticketAccount || l.ticketPickupDate ? '' : 'display:none'}">
-      ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
+    <label class="check-row">填寫購票帳號與領票資訊 <input type="checkbox" id="l-more-toggle" ${l.ticketAccount || l.ticketPickupDate || l.ticketOrderNumber ? 'checked' : ''}></label>
+    <div id="ticket-more" style="${l.ticketAccount || l.ticketPickupDate || l.ticketOrderNumber ? '' : 'display:none'}">
+      <div class="field-row">
+        ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
+        ${fieldHtml('訂單編號', `<input id="l-ticketOrderNumber" value="${esc(l.ticketOrderNumber || '')}">`)}
+      </div>
       <div class="field-row">
         ${fieldHtml('領票日（不填＝隨時可領）', `<input id="l-ticketPickupDate" type="date" value="${esc(l.ticketPickupDate)}">`)}
         ${fieldHtml('或開演前Ｎ天可領', `<input id="l-pickupDays" type="number" inputmode="numeric" placeholder="例：3">`)}
@@ -2013,7 +2023,7 @@ function openLedgerForm(existing, preset, backEventId) {
   };
 
   $('#ledger-save').onclick = () => {
-    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount', 'ticketPickupDate'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount', 'ticketOrderNumber', 'ticketPickupDate'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
     l.ticketPickedUp = $('#l-ticketPickedUp').checked;
     l.category = $('#l-category').value;
     l.type = 'expense';
@@ -2061,7 +2071,7 @@ function saveTransfer(t) {
   const i = DB.transfers.findIndex(x => x.id === t.id);
   if (i >= 0) DB.transfers[i] = t; else DB.transfers.unshift(t);
   saveDB();
-  pushOps([{ action: 'upsert', table: 'transfers', rows: [t] }]);
+  return pushOps([{ action: 'upsert', table: 'transfers', rows: [t] }]);
 }
 function deleteTransfer(t) {
   DB.transfers = DB.transfers.filter(x => x.id !== t.id);
@@ -2194,6 +2204,513 @@ function openTransferForm(existing) {
     };
   }
 }
+
+/* ---------- 掃票：上傳購票截圖 → AI 讀取 → 確認 → 上傳 ---------- */
+const TICKET_PLATFORMS = ['拓元', 'KKTIX', 'ibon', '年代', '寬宏', '遠大', 'NOL', 'Melon', 'YES24'];
+const PLATFORM_ALIAS = { interpark: 'NOL', 'nol ticket': 'NOL', 'nol interpark': 'NOL', tixcraft: '拓元', kham: '寬宏', 'era ticket': '年代' };
+const SCAN_PAY = [['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付'], ['cash', '現金']];
+const SCAN_DRAFT_KEY = 'sl-scan-draft';
+const SCAN_MEM_KEY = 'sl-scan-mem';
+let scan = null;
+let scanTestQuota = false;
+
+const scanDraft = () => JSON.parse(localStorage.getItem(SCAN_DRAFT_KEY) || 'null');
+const scanMem = () => Object.assign({ accounts: {}, details: [] }, JSON.parse(localStorage.getItem(SCAN_MEM_KEY) || '{}'));
+function newScan() {
+  return {
+    images: [], status: 'reading', error: '', model: '', unsure: [], twdTouched: false, otherPlatform: false, otherPayer: false,
+    answers: { purpose: '', platform: '', account: '', payMethod: '', payDetail: '', payer: '' },
+    f: {
+      eventName: '', artist: '', date: '', time: '', city: '', venue: '', ticketType: '', area: '', row: '', seat: '',
+      ticketCount: 1, currency: 'TWD', unitFace: '', unitFee: '', totalPaid: '', amountTwd: '', exchangeRate: '',
+      orderNumber: '', pickupDate: '',
+    },
+  };
+}
+function saveScanDraft() {
+  if (!scan || !['done', 'manual'].includes(scan.status)) return;
+  const { answers, f, unsure, twdTouched, status, model } = scan;
+  localStorage.setItem(SCAN_DRAFT_KEY, JSON.stringify({ answers, f, unsure, twdTouched, status, model }));
+}
+const clearScanDraft = () => localStorage.removeItem(SCAN_DRAFT_KEY);
+
+// 付款人選項：票券流水裡最常出現的付款人
+function scanPayers() {
+  const cnt = {};
+  DB.ledger.forEach(l => { if (l.category === 'ticket' && l.payer) cnt[l.payer] = (cnt[l.payer] || 0) + 1; });
+  return Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a]).slice(0, 3);
+}
+function scanAccounts(platform) {
+  if (!platform) return [];
+  const set = new Set(scanMem().accounts[platform] || []);
+  DB.ledger.forEach(l => { if (l.ticketPlatform === platform && l.ticketAccount) set.add(l.ticketAccount); });
+  return [...set].slice(0, 6);
+}
+function scanPayDetails() {
+  const cnt = {};
+  scanMem().details.forEach(d => { cnt[d] = (cnt[d] || 0) + 100; });
+  DB.ledger.forEach(l => { if (l.paymentDetail) cnt[l.paymentDetail] = (cnt[l.paymentDetail] || 0) + 1; });
+  return Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a]).slice(0, 6);
+}
+
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('讀不到這個檔案'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('這不是可讀取的圖片'));
+      img.onload = () => {
+        const scale = Math.min(1, 2000 / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const url = canvas.toDataURL('image/jpeg', 0.85);
+        resolve({ url, dataBase64: url.split(',')[1] });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// 匯率慣例：KRW、JPY 為 TWD 1 = 原幣 X；USD 為 USD 1 = TWD X
+async function fetchRate(cur) {
+  try {
+    const d = await (await fetch('https://open.er-api.com/v6/latest/TWD', { signal: AbortSignal.timeout(6000) })).json();
+    const x = d.rates && d.rates[cur];
+    if (!x) return 0;
+    return Number((cur === 'USD' ? 1 / x : x).toFixed(4));
+  } catch (e) {
+    return 0;
+  }
+}
+const foreignToTwd = (cur, amount, rate) => !rate ? 0 : Math.round(cur === 'USD' ? amount * rate : amount / rate);
+
+async function startScan(files) {
+  files = files.filter(f => /^image\//.test(f.type));
+  if (!files.length) { toast('請選擇圖片檔'); return; }
+  if (!CFG.apiUrl) { toast('請先到「設定」填入 Apps Script 網址與共用密碼'); setTab('settings'); return; }
+  if (scanDraft() && !confirm('有一筆還沒上傳的掃票，要捨棄它、開始新的嗎？')) return;
+  clearScanDraft();
+  const s = scan = newScan();
+  openScanSheet();
+  try {
+    s.images = await Promise.all(files.slice(0, 5).map(compressImage));
+  } catch (err) {
+    s.status = 'error';
+    s.error = err.message;
+    renderScanBody();
+    return;
+  }
+  renderScanBody();
+  try {
+    const res = await apiPost({
+      action: 'scanTicket', test: scanTestQuota ? 'quota' : '',
+      images: s.images.map(i => ({ mimeType: 'image/jpeg', dataBase64: i.dataBase64 })),
+    });
+    scanTestQuota = false;
+    s.model = res.model || '';
+    await applyScanResult(s, res.data || {});
+    s.status = 'done';
+  } catch (err) {
+    scanTestQuota = false;
+    s.status = 'error';
+    s.error = err.message === 'bad key' ? '共用密碼不對，請到「設定」確認共用密碼' : err.message;
+  }
+  if (scan !== s) return;
+  saveScanDraft();
+  if ($('#scan-body')) renderScanBody();
+}
+
+async function applyScanResult(s, d) {
+  const f = s.f, a = s.answers;
+  const str = v => String(v == null ? '' : v).trim();
+  ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'ticketType', 'orderNumber', 'pickupDate'].forEach(k => { f[k] = str(d[k]); });
+  const seats = Array.isArray(d.seats) ? d.seats : [];
+  const joinUnique = k => [...new Set(seats.map(x => str(x[k])).filter(Boolean))].join('、');
+  f.area = joinUnique('area');
+  f.row = joinUnique('row');
+  f.seat = seats.map(x => str(x.seat)).filter(Boolean).join('、');
+  f.ticketCount = num(d.ticketCount) || seats.length || 1;
+  f.currency = CURRENCIES.includes(str(d.currency).toUpperCase()) ? str(d.currency).toUpperCase() : 'TWD';
+  f.unitFace = num(d.unitFace) || '';
+  f.unitFee = num(d.unitFee) || '';
+  f.totalPaid = num(d.totalPaid) || (num(d.unitFace) + num(d.unitFee)) * f.ticketCount || '';
+  const unsure = new Set();
+  (Array.isArray(d.uncertain) ? d.uncertain : []).forEach(k => {
+    if (k === 'seats') ['area', 'row', 'seat'].forEach(x => unsure.add(x));
+    else if (k in f) unsure.add(k);
+  });
+  ['eventName', 'date', 'venue', 'totalPaid'].forEach(k => { if (!f[k]) unsure.add(k); });
+  if (f.currency !== 'TWD') {
+    f.exchangeRate = await fetchRate(f.currency) || '';
+    f.amountTwd = foreignToTwd(f.currency, num(f.totalPaid), num(f.exchangeRate)) || '';
+    unsure.add('amountTwd');
+  }
+  s.unsure = [...unsure];
+  const plat = str(d.platform);
+  if (!a.platform && plat) {
+    a.platform = PLATFORM_ALIAS[plat.toLowerCase()] || TICKET_PLATFORMS.find(p => p.toLowerCase() === plat.toLowerCase()) || plat;
+    s.otherPlatform = !TICKET_PLATFORMS.includes(a.platform);
+  }
+  if (!a.account && str(d.account)) a.account = str(d.account);
+}
+
+function openScanSheet() {
+  openSheet(`${sheetTitleHtml('掃票', false)}<div id="scan-body"></div>`);
+  $('#sh-close').onclick = () => { closeSheet(); render(); };
+  const body = $('#scan-body');
+  body.addEventListener('input', e => {
+    const el = e.target;
+    if (!scan) return;
+    if (el.dataset.f) {
+      scan.f[el.dataset.f] = el.value;
+      scan.unsure = scan.unsure.filter(k => k !== el.dataset.f);
+      const field = el.closest('.field');
+      if (field) field.classList.remove('unsure');
+      if (el.dataset.f === 'amountTwd') scan.twdTouched = true;
+      if (el.dataset.f === 'totalPaid' && scan.f.currency !== 'TWD' && !scan.twdTouched) {
+        scan.f.amountTwd = foreignToTwd(scan.f.currency, num(scan.f.totalPaid), num(scan.f.exchangeRate)) || '';
+        const t = $('[data-f="amountTwd"]', body);
+        if (t) t.value = scan.f.amountTwd;
+      }
+    } else if (el.dataset.a) {
+      scan.answers[el.dataset.a] = el.value.trim();
+    }
+    saveScanDraft();
+  });
+  body.addEventListener('change', async e => {
+    if (!scan || e.target.dataset.f !== 'currency') return;
+    const s = scan;
+    if (s.f.currency !== 'TWD') {
+      s.f.exchangeRate = await fetchRate(s.f.currency) || '';
+      if (!s.twdTouched) s.f.amountTwd = foreignToTwd(s.f.currency, num(s.f.totalPaid), num(s.f.exchangeRate)) || '';
+      if (!s.unsure.includes('amountTwd')) s.unsure.push('amountTwd');
+    }
+    saveScanDraft();
+    renderScanBody();
+  });
+  renderScanBody();
+}
+
+function scanChip(group, value, label, on) {
+  return `<button class="chip ${on ? 'on' : ''}" data-pick="${group}" data-v="${esc(value)}">${esc(label)}</button>`;
+}
+function scanField(label, key, attrs) {
+  const unsure = scan.unsure.includes(key);
+  return `<div class="field ${unsure ? 'unsure' : ''}"><label>${label}<em>請確認</em></label>
+    <input data-f="${key}" value="${esc(scan.f[key])}" ${attrs || ''}></div>`;
+}
+
+function renderScanBody() {
+  const body = $('#scan-body');
+  if (!body || !scan) return;
+  const s = scan, a = s.answers, f = s.f;
+
+  if (s.status === 'saved') {
+    const r = s.result;
+    body.innerHTML = `<div class="scan-done">
+      <div class="glyph">✦</div>
+      <div class="scan-done-title">${r.ok ? '已建檔' : '已存在這台裝置'}</div>
+      <div class="section-note" style="text-align:center">${r.ok
+        ? (r.kind === 'event' ? '場次與票券已存進試算表' : '已記到「讓票」頁')
+        : '上傳試算表失敗，請在網路恢復後到「設定」按「全部上傳」'}</div>
+      <div class="sheet-actions">
+        <button class="btn primary" id="scan-view">去看這筆</button>
+        <button class="btn line" id="scan-again">再掃一張</button>
+      </div>
+    </div>`;
+    $('#scan-view').onclick = () => {
+      closeSheet();
+      if (r.kind === 'event') {
+        setTab('events');
+        const ev = DB.events.find(e => e.id === r.id);
+        if (ev) openEventForm(ev);
+      } else {
+        state.lgSeg = 'transfer';
+        setTab('ledger');
+        const t = (DB.transfers || []).find(x => x.id === r.id);
+        if (t) openTransferForm(t);
+      }
+    };
+    $('#scan-again').onclick = () => { closeSheet(); setTab('home'); $('#scan-file').click(); };
+    return;
+  }
+
+  if (s.status === 'dupe') {
+    body.innerHTML = `<div class="form-section">總帳裡已經有同一天的場次</div>
+      <div class="hint">要把這張票加到既有場次，還是另建一個新場次？</div>
+      ${s.dupes.map(e => `<div class="card">
+        <div class="row-title">${esc(eventTitle(e))}</div>
+        <div class="row-meta"><span>${esc(e.startDate)}${e.startTime ? ' ' + esc(e.startTime) : ''}</span>${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}${e.seat ? `<span>${esc(e.seat)}</span>` : ''}</div>
+        <button class="btn line small" style="margin-top:10px" data-use-event="${esc(e.id)}">加到這個場次</button>
+      </div>`).join('')}
+      <div class="sheet-actions">
+        <button class="btn primary" id="scan-new-event">另建新場次</button>
+        <button class="btn line" id="scan-back">返回修改</button>
+      </div>`;
+    $$('[data-use-event]', body).forEach(b => b.onclick = () => commitScan(DB.events.find(e => e.id === b.dataset.useEvent)));
+    $('#scan-new-event').onclick = () => commitScan(null);
+    $('#scan-back').onclick = () => { s.status = 'done'; renderScanBody(); };
+    return;
+  }
+
+  const payers = scanPayers();
+  const accounts = scanAccounts(a.platform);
+  const details = scanPayDetails();
+  const platOther = s.otherPlatform || (a.platform && !TICKET_PLATFORMS.includes(a.platform));
+  const payerOther = s.otherPayer || (a.payer && !payers.includes(a.payer));
+  const foreign = f.currency !== 'TWD';
+  const ready = s.status === 'done' || s.status === 'manual';
+
+  const statusHtml = s.status === 'reading'
+    ? `<div class="scan-status"><span class="scan-spin"></span>AI 讀取中…先回答下面的問題吧</div>`
+    : s.status === 'error'
+      ? `<div class="scan-status err">${esc(s.error)}</div>
+         <button class="btn line" id="scan-manual">改成手動填寫</button>`
+      : s.status === 'done'
+        ? `<div class="scan-status ok">✦ 已讀取，請核對下方資訊，黃色欄位特別留意</div>`
+        : `<div class="scan-status">手動填寫</div>`;
+
+  body.innerHTML = `
+    ${s.images.length ? `<div class="scan-thumbs">${s.images.map(i => `<img src="${i.url}" alt="">`).join('')}</div>` : ''}
+    ${statusHtml}
+
+    <div class="scan-q">
+      <div class="scan-q-title">這是自己要去的，還是要轉賣？</div>
+      <div class="scan-chips">${scanChip('purpose', 'self', '自己去', a.purpose === 'self')}${scanChip('purpose', 'resale', '要轉賣', a.purpose === 'resale')}</div>
+    </div>
+    <div class="scan-q">
+      <div class="scan-q-title">在哪個平台、誰的帳號買的？</div>
+      <div class="scan-chips">${TICKET_PLATFORMS.map(p => scanChip('platform', p, p, a.platform === p && !platOther)).join('')}${scanChip('platform', '__other', '其他', platOther)}</div>
+      ${platOther ? `<input data-a="platform" placeholder="平台名稱" value="${esc(TICKET_PLATFORMS.includes(a.platform) ? '' : a.platform)}" style="margin-bottom:8px">` : ''}
+      <input data-a="account" placeholder="帳號（名字、信箱、帳號名稱或電話）" value="${esc(a.account)}">
+      ${accounts.length ? `<div class="scan-chips" style="margin-top:8px">${accounts.map(x => scanChip('account', x, x, a.account === x)).join('')}</div>` : ''}
+    </div>
+    <div class="scan-q">
+      <div class="scan-q-title">付款方式及付款人？</div>
+      <div class="scan-chips">${SCAN_PAY.map(([v, l]) => scanChip('payMethod', v, l, a.payMethod === v)).join('')}</div>
+      <input data-a="payDetail" placeholder="卡別／平台（例：永豐、LINE Pay）" value="${esc(a.payDetail)}">
+      ${details.length ? `<div class="scan-chips" style="margin-top:8px">${details.map(x => scanChip('payDetail', x, x, a.payDetail === x)).join('')}</div>` : ''}
+      <div class="scan-q-sub">付款人</div>
+      <div class="scan-chips">${payers.map(p => scanChip('payer', p, p, a.payer === p && !payerOther)).join('')}${scanChip('payer', '__other', '其他', payerOther)}</div>
+      ${payerOther ? `<input data-a="payer" placeholder="付款人名字" value="${esc(payers.includes(a.payer) ? '' : a.payer)}">` : ''}
+    </div>
+
+    ${ready ? `
+    <div class="form-section">場次</div>
+    ${scanField('活動名稱', 'eventName')}
+    ${scanField('表演者', 'artist')}
+    <div class="field-row">${scanField('日期', 'date', 'type="date"')}${scanField('開演時間', 'time', 'type="time"')}</div>
+    <div class="field-row">${scanField('城市', 'city')}${scanField('場館', 'venue')}</div>
+
+    <div class="form-section">票券</div>
+    <div class="field-row">${scanField('票種', 'ticketType')}${scanField('張數', 'ticketCount', 'type="number" inputmode="numeric"')}</div>
+    <div class="field-row">${scanField('區域', 'area')}${scanField('排', 'row')}${scanField('座號', 'seat')}</div>
+    <div class="field-row">
+      <div class="field"><label>幣別</label>${selectHtml('scan-currency', CURRENCIES.map(c => [c, c]), f.currency).replace('<select ', '<select data-f="currency" ')}</div>
+      ${scanField('單張票面', 'unitFace', 'type="number" inputmode="decimal"')}
+      ${scanField('單張手續費', 'unitFee', 'type="number" inputmode="decimal"')}
+    </div>
+    ${scanField(foreign ? `付款總額（${esc(f.currency)}）` : '付款總額（台幣）', 'totalPaid', 'type="number" inputmode="decimal"')}
+    ${foreign ? `
+    <div class="field-row">${scanField('台幣實付', 'amountTwd', 'type="number" inputmode="numeric"')}${scanField(f.currency === 'USD' ? '匯率（USD 1 = TWD）' : `匯率（TWD 1 = ${esc(f.currency)}）`, 'exchangeRate', 'type="number" step="any" inputmode="decimal"')}</div>
+    <div class="hint">台幣實付先用今天匯率估算，拿到信用卡帳單後可改成實際金額</div>` : ''}
+    <div class="field-row">${scanField('訂單編號', 'orderNumber')}${scanField('領票日', 'pickupDate', 'type="date"')}</div>
+
+    <div class="sheet-actions">
+      <button class="btn primary" id="scan-save">確認並上傳</button>
+      <button class="btn line" id="scan-discard">捨棄這筆</button>
+    </div>` : ''}`;
+
+  $$('[data-pick]', body).forEach(b => b.onclick = () => {
+    const g = b.dataset.pick, v = b.dataset.v;
+    if (g === 'platform') {
+      s.otherPlatform = v === '__other';
+      a.platform = s.otherPlatform ? (TICKET_PLATFORMS.includes(a.platform) ? '' : a.platform) : v;
+    } else if (g === 'payer') {
+      s.otherPayer = v === '__other';
+      a.payer = s.otherPayer ? (payers.includes(a.payer) ? '' : a.payer) : v;
+    } else a[g] = v;
+    saveScanDraft();
+    renderScanBody();
+  });
+  const manual = $('#scan-manual');
+  if (manual) manual.onclick = () => { s.status = 'manual'; saveScanDraft(); renderScanBody(); };
+  if (!ready) return;
+  $('#scan-discard').onclick = () => {
+    if (!confirm('捨棄這筆掃票？')) return;
+    scan = null;
+    clearScanDraft();
+    closeSheet();
+    render();
+  };
+  $('#scan-save').onclick = () => saveScan();
+}
+
+const normName = v => String(v || '').toLowerCase().replace(/[\s\-–—_:：·・,，.。!！?？'"「」『』()（）[\]【】]/g, '');
+function findSameEvents(f) {
+  const n = normName(f.eventName), ar = normName(f.artist);
+  return DB.events.filter(e => {
+    if (!f.date || e.startDate !== f.date) return false;
+    const en = normName(e.name);
+    return (n && en && (en.includes(n) || n.includes(en))) || (ar && normName(e.artist) === ar);
+  });
+}
+
+async function saveScan() {
+  const s = scan, f = s.f, a = s.answers;
+  if (!a.purpose) { toast('請先選「自己去」或「要轉賣」'); return; }
+  if (!String(f.eventName).trim()) { toast('請填活動名稱'); return; }
+  if (a.purpose === 'self' && !f.date) { toast('請填日期'); return; }
+  const btn = $('#scan-save');
+  btn.disabled = true;
+  btn.textContent = '確認中…';
+  // 先拿雲端最新資料，朋友剛建的場次才比對得到
+  if (CFG.apiUrl && !isDirty()) {
+    try { DB = assembleDB(await apiGet()); saveDB(); } catch (e) { /* 連不上就用本機資料比對 */ }
+  }
+  const same = findSameEvents(f);
+  if (a.purpose === 'self' && same.length) {
+    s.status = 'dupe';
+    s.dupes = same;
+    renderScanBody();
+    return;
+  }
+  commitScan(a.purpose === 'resale' ? same[0] || null : null);
+}
+
+async function commitScan(existingEvent) {
+  const s = scan, f = s.f, a = s.answers;
+  const body = $('#scan-body');
+  if (body) body.innerHTML = '<div class="scan-status" style="margin-top:20px"><span class="scan-spin"></span>上傳中…</div>';
+  const clean = v => String(v == null ? '' : v).trim();
+  const foreign = f.currency !== 'TWD';
+  const count = Math.max(1, num(f.ticketCount) || 1);
+  const amountTwd = Math.round(num(foreign ? f.amountTwd : f.totalPaid));
+  const notes = [];
+  if (foreign) {
+    notes.push(`單張票面 ${fmtMoney(f.currency, f.unitFace)}` + (num(f.unitFee) ? `＋手續費 ${fmtMoney(f.currency, f.unitFee)}` : ''));
+    if (!s.twdTouched) notes.push('台幣實付為估算，尚未對帳單確認');
+  }
+  let ok;
+  let result;
+  if (a.purpose === 'self') {
+    const ev = existingEvent || {
+      id: uid(), name: clean(f.eventName), artist: clean(f.artist), city: clean(f.city), venue: clean(f.venue),
+      startDate: f.date, startTime: f.time, endDate: '', eventNumber: '', originalDate: '', eventType: '', liveTour: '',
+      seriesEvent: '', seat: '', ticketPriceTwd: '', guest: '', payer: '', settled: false, notes: '', createdAt: today(), coverUrl: '',
+    };
+    if (existingEvent) {
+      if (!ev.startTime && f.time) ev.startTime = f.time;
+      if (!ev.venue && clean(f.venue)) ev.venue = clean(f.venue);
+      if (!ev.city && clean(f.city)) ev.city = clean(f.city);
+      if (!ev.artist && clean(f.artist)) ev.artist = clean(f.artist);
+    }
+    const l = {
+      id: uid(), type: 'expense', category: 'ticket', date: f.date || today(), title: '票券 - ' + ev.name, eventId: ev.id,
+      amountTwd: amountTwd || '', currency: foreign ? f.currency : '', originalAmount: foreign ? num(f.totalPaid) || '' : '',
+      exchangeRate: foreign ? num(f.exchangeRate) || '' : '', payer: a.payer, paymentMethod: a.payMethod, paymentDetail: a.payDetail,
+      counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '', notes: notes.join('｜'),
+      ticketType: clean(f.ticketType), ticketArea: clean(f.area), ticketRow: clean(f.row), ticketSeat: clean(f.seat),
+      attendee: '', ticketStatus: '', ticketFaceTwd: foreign ? '' : num(f.unitFace) || '', ticketBenefitTwd: '',
+      ticketFeeTwd: foreign ? '' : num(f.unitFee) || '', ticketPlatform: a.platform, ticketAccount: a.account, ticketCount: count,
+      splits: CFG.myName && amountTwd ? [{ name: CFG.myName, count: 1, amountTwd: Math.round(amountTwd / count), settled: false }] : [],
+      ticketPickupDate: f.pickupDate, ticketPickedUp: false, ticketOrderNumber: clean(f.orderNumber), createdAt: today(),
+    };
+    const okEvent = await saveEvent(ev);
+    const okLedger = await saveLedger(l);
+    ok = okEvent && okLedger;
+    result = { kind: 'event', id: ev.id, ok };
+  } else {
+    const title = f.artist && !clean(f.eventName).includes(clean(f.artist)) ? clean(f.artist) + ' - ' + clean(f.eventName) : clean(f.eventName);
+    const info = [
+      a.platform && '平台：' + a.platform, a.account && '帳號：' + a.account,
+      (a.payMethod || a.payDetail) && '付款：' + [PAY_LABEL[a.payMethod] || '', a.payDetail].filter(Boolean).join(' '),
+      a.payer && '付款人：' + a.payer, clean(f.orderNumber) && '訂單：' + clean(f.orderNumber),
+      f.time && '開演 ' + f.time, clean(f.venue) && [clean(f.city), clean(f.venue)].filter(Boolean).join(' '),
+      clean(f.ticketType) && '票種：' + clean(f.ticketType), f.pickupDate && '領票日 ' + f.pickupDate,
+    ].filter(Boolean);
+    const t = {
+      id: uid(), date: f.date || today(), eventId: existingEvent ? existingEvent.id : '', kind: '轉賣', person: '', title,
+      ticketCount: count, ticketArea: clean(f.area), ticketRow: clean(f.row), ticketSeat: clean(f.seat),
+      costTwd: amountTwd || '', amountTwd: '', feeTwd: '', settled: false, notes: info.concat(notes).join('｜'), createdAt: today(),
+    };
+    ok = await saveTransfer(t);
+    result = { kind: 'transfer', id: t.id, ok };
+  }
+  const mem = scanMem();
+  if (a.platform && a.account) {
+    mem.accounts[a.platform] = [a.account].concat((mem.accounts[a.platform] || []).filter(x => x !== a.account)).slice(0, 6);
+  }
+  if (a.payDetail) mem.details = [a.payDetail].concat(mem.details.filter(x => x !== a.payDetail)).slice(0, 6);
+  localStorage.setItem(SCAN_MEM_KEY, JSON.stringify(mem));
+  clearScanDraft();
+  scan = { status: 'saved', result, images: [], unsure: [] };
+  render();
+  renderScanBody();
+}
+
+function scanHeroHtml() {
+  const d = scanDraft();
+  return `<div class="scan-hero" id="scan-drop">
+    <div class="scan-eyebrow">TICKET SCAN</div>
+    <div class="scan-title">上傳購票截圖</div>
+    <div class="scan-sub">AI 會讀出場次、日期、座位與票價</div>
+    <button class="btn primary scan-btn" id="scan-pick">選擇截圖</button>
+    <div class="scan-sub scan-desktop">也可以把截圖拖進來，或直接貼上（⌘V）</div>
+    <input type="file" id="scan-file" accept="image/*" multiple style="display:none">
+  </div>
+  ${d ? `<div class="card scan-draft">
+    <div class="row-head"><div class="row-title">有一筆還沒上傳的掃票</div><span class="badge warn">未完成</span></div>
+    <div class="row-meta"><span>${esc(d.f.eventName || '未命名')}</span>${d.f.date ? `<span>${esc(d.f.date)}</span>` : ''}</div>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn line small" id="scan-resume">繼續</button>
+      <button class="btn line small" id="scan-drop-draft">捨棄</button>
+    </div>
+  </div>` : ''}`;
+}
+function bindScanHero(view) {
+  const drop = $('#scan-drop', view);
+  if (!drop) return;
+  $('#scan-pick', view).onclick = () => $('#scan-file', view).click();
+  $('#scan-file', view).onchange = e => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    startScan(files);
+  };
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('drag');
+    startScan(Array.from(e.dataTransfer.files || []));
+  });
+  const resume = $('#scan-resume', view);
+  if (resume) {
+    resume.onclick = () => {
+      scan = Object.assign(newScan(), scanDraft(), { images: [] });
+      openScanSheet();
+    };
+    $('#scan-drop-draft', view).onclick = () => {
+      if (!confirm('捨棄這筆未完成的掃票？')) return;
+      clearScanDraft();
+      render();
+    };
+  }
+}
+document.addEventListener('paste', e => {
+  if (state.tab !== 'home' || $('#sheet').classList.contains('show')) return;
+  const files = Array.from((e.clipboardData && e.clipboardData.files) || []).filter(f => /^image\//.test(f.type));
+  if (!files.length) return;
+  e.preventDefault();
+  startScan(files);
+});
 
 /* ---------- 舊格式整理 ---------- */
 // 1) 早期範本標題「活動名稱｜分類」改成「分類 - 活動名稱」；自訂標題不動

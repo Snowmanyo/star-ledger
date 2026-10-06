@@ -10,8 +10,12 @@ const SHARED_KEY = PROPS.getProperty('SHARED_KEY') || '';
 const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']; // 第一個額度用完或忙線時改用下一個
 const SHEET_ID = ''; // 從試算表「擴充功能→Apps Script」開的專案留空；獨立專案填試算表網址 /d/ 後面那串 ID
 
+// 同一次執行裡只開一次試算表、每個分頁只讀一次（寫入後才重讀），回覆會快很多
+let SS_ = null;
+const TABLE_MEMO_ = {};
 function ss_() {
-  return SHEET_ID ? SpreadsheetApp.openById(SHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+  if (!SS_) SS_ = SHEET_ID ? SpreadsheetApp.openById(SHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+  return SS_;
 }
 
 const TABLES = {
@@ -44,6 +48,7 @@ function setup_() {
 }
 
 function readTable_(name) {
+  if (TABLE_MEMO_[name]) return TABLE_MEMO_[name];
   const sheet = ss_().getSheetByName(name);
   const cols = TABLES[name];
   const last = sheet.getLastRow();
@@ -56,10 +61,12 @@ function readTable_(name) {
     cols.forEach(function (c, i) { row[c] = v[i]; });
     rows.push(row);
   });
+  TABLE_MEMO_[name] = rows;
   return rows;
 }
 
 function writeRows_(name, rows) {
+  delete TABLE_MEMO_[name];
   const sheet = ss_().getSheetByName(name);
   const cols = TABLES[name];
   const last = sheet.getLastRow();
@@ -79,6 +86,7 @@ function writeRows_(name, rows) {
 }
 
 function deleteRows_(name, idList) {
+  delete TABLE_MEMO_[name];
   const sheet = ss_().getSheetByName(name);
   const last = sheet.getLastRow();
   if (last < 2) return;
@@ -1166,21 +1174,64 @@ function pendingTickets_(ledger, events, today) {
   }).map(function (l) { return { l: l, ev: byId[l.eventId] }; });
 }
 
+/* ---------- 清單卡片（手機上好讀的排版） ---------- */
+// 每筆左邊是日期欄，右邊是內容；一張卡片放 6 筆，多的往右滑
+const C_INK = '#40382E', C_MUTED = '#9C917F', C_ACCENT = '#A67B5B', C_OK = '#7C9A6D', C_LINE = '#E7DECF';
+const ftext_ = function (text, size, color, extra) {
+  return Object.assign({ type: 'text', text: String(text), size: size || 'sm', color: color || C_INK, wrap: true }, extra || {});
+};
+// e：{ date, time, top, title, lines: [], status, statusColor, section }
+function agendaRow_(e) {
+  if (e.section) return ftext_(e.section, 'sm', C_ACCENT, { weight: 'bold', margin: 'lg' });
+  const ok = /^\d{4}-\d{2}-\d{2}$/.test(e.date || '');
+  const left = { type: 'box', layout: 'vertical', width: '58px', flex: 0, contents: ok ? [
+    ftext_(e.date.slice(0, 4), 'xxs', C_MUTED),
+    ftext_(e.date.slice(5, 7) + '/' + e.date.slice(8, 10), 'md', C_INK, { weight: 'bold' }),
+    ftext_('週' + WEEK_[new Date(e.date + 'T00:00:00Z').getUTCDay()] + (e.time ? '\n' + e.time : ''), 'xs', C_MUTED),
+  ] : [ftext_('日期\n未定', 'xs', C_MUTED)] };
+  const right = { type: 'box', layout: 'vertical', flex: 1, spacing: 'xs', contents: [
+    e.top ? ftext_(e.top, 'xs', C_ACCENT, { weight: 'bold' }) : null,
+    ftext_(e.title || '—', 'sm', C_INK, { weight: 'bold', maxLines: 3 }),
+  ].concat((e.lines || []).filter(Boolean).map(function (x) { return ftext_(x, 'xs', C_MUTED); }))
+    .concat(e.status ? [ftext_(e.status, 'xs', e.statusColor || C_ACCENT, { weight: 'bold' })] : []).filter(Boolean) };
+  return { type: 'box', layout: 'horizontal', spacing: 'md', margin: 'lg', contents: [left, right] };
+}
+function agendaMessage_(title, entries, opts) {
+  opts = opts || {};
+  const per = 6;
+  const pages = [];
+  let cur = [];
+  entries.forEach(function (e) {
+    if (cur.filter(function (x) { return !x.section; }).length >= per && !e.section) { pages.push(cur); cur = []; }
+    cur.push(e);
+  });
+  if (cur.length) pages.push(cur);
+  const bubbles = pages.slice(0, 12).map(function (pg, pi) {
+    const body = [ftext_(title, 'md', C_INK, { weight: 'bold' })];
+    if (opts.sub) body.push(ftext_(opts.sub, 'xs', C_MUTED));
+    pg.forEach(function (e, i) {
+      if (i > 0 && !e.section && !pg[i - 1].section) body.push({ type: 'separator', margin: 'lg', color: C_LINE });
+      body.push(agendaRow_(e));
+    });
+    if (pages.length > 1) body.push(ftext_((pi + 1) + ' / ' + Math.min(pages.length, 12) + (pi < pages.length - 1 ? '　往左滑看更多 →' : ''), 'xxs', C_MUTED, { margin: 'xl', align: 'end' }));
+    if (opts.foot && pi === pages.length - 1) body.push(ftext_(opts.foot, 'xxs', C_MUTED, { margin: 'xl' }));
+    return { type: 'bubble', size: 'giga', body: { type: 'box', layout: 'vertical', spacing: 'none', contents: body } };
+  });
+  const msg = { type: 'flex', altText: title, contents: bubbles.length === 1 ? bubbles[0] : { type: 'carousel', contents: bubbles } };
+  if (opts.quick && opts.quick.length) msg.quickReply = ask_('', opts.step, opts.quick).quickReply;
+  return msg;
+}
+const placeText_ = function (it) { return [it.city, it.venue].filter(Boolean).join(' '); };
+const pre_ = function (icon, v) { return str_(v) ? icon + ' ' + str_(v) : ''; };
+
 function upcomingText_(q) {
   const today = today_();
   const list = sheetRows_('events').filter(function (e) { return String(e.startDate) >= today && matchEvent_(e, q) && inPeriod_(e.startDate, q); })
     .sort(function (a, b) { return String(a.startDate + a.startTime).localeCompare(String(b.startDate + b.startTime)); });
   if (!list.length) return '沒有符合的未來場次。';
-  // 每場：YYYY/MM/DD(星期) 演出時間／演出者｜活動名稱／地點
-  const lines = list.slice(0, 15).map(function (e) {
-    const day = e.startDate.replace(/-/g, '/') + '(' + WEEK_[new Date(e.startDate + 'T00:00:00Z').getUTCDay()] + ')';
-    return [
-      day + (e.startTime ? ' ' + e.startTime : ''),
-      [e.artist, e.name].filter(Boolean).join('｜'),
-      [e.city, e.venue].filter(Boolean).join(' '),
-    ].filter(Boolean).join('\n');
-  });
-  return '接下來的場次（' + list.length + ' 場）\n\n' + lines.join('\n\n') + (list.length > 15 ? '\n…還有 ' + (list.length - 15) + ' 場，到網站「活動」頁看全部' : '');
+  return agendaMessage_('接下來的場次', list.slice(0, 72).map(function (e) {
+    return { date: e.startDate, time: e.startTime, top: e.artist, title: e.name, lines: [pre_('📍', placeText_(e))] };
+  }), { sub: '共 ' + list.length + ' 場' });
 }
 
 // 自己的票（總帳）與轉賣的票（讓票頁）整理成同一種格式；一筆紀錄＝一張訂單
@@ -1246,15 +1297,22 @@ function pickupListMessage_() {
   const today = today_();
   const p = pendingPickups_(today);
   if (!p.own.length && !p.resale.length) return '目前沒有待取的票 ✦';
-  const section = function (title, list) {
-    return list.length ? title + '（' + list.length + ' 筆）\n\n' + list.map(function (it) { return itemBlock_(it) + '\n' + pickupStatus_(it, today); }).join('\n\n') : '';
+  const entry = function (it) {
+    const ready = !it.pickupDate || it.pickupDate <= today;
+    return {
+      date: it.date, time: it.time, top: it.artist, title: it.name,
+      lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, it.count > 1 ? '×' + it.count + ' 張' : ''].filter(Boolean).join('　')),
+        [it.pickupMethod, [it.platform, it.account].filter(Boolean).join(' ')].filter(Boolean).join('｜')],
+      status: ready ? '✅ 現在可取' : '⏳ ' + dateW_(it.pickupDate) + ' 起可取', statusColor: ready ? C_OK : C_ACCENT,
+    };
   };
-  const text = [section('🎫 自己的票', p.own), section('🔁 轉賣的票', p.resale)].filter(Boolean).join('\n\n────────\n\n');
+  const entries = (p.own.length ? [{ section: '🎫 自己的票（' + p.own.length + '）' }].concat(p.own.map(entry)) : [])
+    .concat(p.resale.length ? [{ section: '🔁 轉賣的票（' + p.resale.length + '）' }].concat(p.resale.map(entry)) : []);
   // 按鈕最多 13 個：演出日期近的排前面，標籤用「日期＋演出者」比較短
   const buttons = p.own.concat(p.resale).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).slice(0, 13).map(function (it) {
     return [(it.kind === 'resale' ? 't:' : '') + it.id, (it.kind === 'resale' ? '已取(轉) ' : '已取 ') + shortMD_(it.date) + ' ' + (it.artist || it.name)];
   });
-  return ask_(text + '\n\n取完票可以點下面的按鈕標記。', 'picked', buttons);
+  return agendaMessage_('待取票', entries, { foot: '取完票可以點下方按鈕標記。', step: 'picked', quick: buttons });
 }
 
 function spendText_(q, me) {
@@ -1286,8 +1344,11 @@ function countText_(q) {
   const seen = events.filter(function (e) { return e.startDate && e.startDate <= today; }).sort(function (a, b) { return String(b.startDate).localeCompare(String(a.startDate)); });
   const future = events.filter(function (e) { return e.startDate > today; });
   const label = (q.artist || q.keyword || '全部') + (q.year ? '（' + q.year + ' 年）' : '');
-  return label + '：已經看過 ' + seen.length + ' 場' + (future.length ? '，還有 ' + future.length + ' 場在後面' : '')
-    + (seen.length ? '\n\n最近的：\n' + seen.slice(0, 8).map(function (e) { return '・' + e.startDate + ' ' + eventTitle_(e); }).join('\n') : '');
+  const sum = label + '：已經看過 ' + seen.length + ' 場' + (future.length ? '，還有 ' + future.length + ' 場在後面' : '');
+  if (!seen.length) return sum;
+  return agendaMessage_(sum, seen.slice(0, 12).map(function (e) {
+    return { date: e.startDate, time: e.startTime, top: e.artist, title: e.name, lines: [pre_('📍', placeText_(e)), pre_('🎫', oneLine_(e.seat))] };
+  }), { sub: '最近看過的' + Math.min(12, seen.length) + ' 場' });
 }
 
 function unsoldTransfers_() {
@@ -1296,13 +1357,16 @@ function unsoldTransfers_() {
     return String(t.settled) !== 'true' && !num_(t.amountTwd) && String(t.date || '9999') >= today && ['退票', '換票'].indexOf(t.kind) < 0;
   }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
 }
-function resaleText_() {
+function resaleText_(title) {
   const list = unsoldTransfers_();
   if (!list.length) return '目前沒有還沒賣出的票 ✦';
   const byId = {};
   sheetRows_('events').forEach(function (e) { byId[e.id] = e; });
-  return '還沒賣出的票（' + list.length + ' 筆）\n\n' + list.map(function (t) { return itemBlock_(transferItem_(t, byId[t.eventId])); }).join('\n\n')
-    + '\n\n賣出後到網站「讓票」頁填上對方付的金額，就不會再出現在這裡。';
+  return agendaMessage_(title || '還沒賣出的票', list.map(function (t) {
+    const it = transferItem_(t, byId[t.eventId]);
+    return { date: it.date, time: it.time, top: it.artist, title: it.name,
+      lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, '×' + it.count + ' 張'].filter(Boolean).join('　')), it.face ? '💰 票面 ' + it.face + (it.fee ? '＋系統服務費 ' + it.fee : '') : ''] };
+  }), { sub: '共 ' + list.length + ' 筆', foot: '賣出後到網站「讓票」頁填上對方付的金額，就不會再出現在這裡。' });
 }
 
 function calendarText_() {
@@ -1448,8 +1512,9 @@ function pickupReminderMessage_(today) {
     contents: { type: 'carousel', contents: pickupBubbles_(items) } };
 }
 function resaleReminderMessage_() {
-  return unsoldTransfers_().length ? '🔔 每週轉賣提醒\n\n' + resaleText_() : null;
+  return unsoldTransfers_().length ? resaleText_('🔔 每週轉賣提醒：還沒賣出的票') : null;
 }
+
 function testReminder_() {
   const today = today_();
   const p = pendingPickups_(today);
@@ -1801,20 +1866,24 @@ function onsaleListMessage_(uid, q) {
   const list = onsaleGroups_().filter(function (g) {
     return g.rows.some(function (r) { return String(r.saleAt) >= now.slice(0, 10); })
       && matchEvent_({ name: g.first.title, artist: g.first.artist, venue: g.first.venue }, q || {});
-  }).sort(function (a, b) {
-    const na = a.rows.filter(function (r) { return r.saleAt >= now; })[0] || a.first;
-    const nb = b.rows.filter(function (r) { return r.saleAt >= now; })[0] || b.first;
-    return String(na.saleAt).localeCompare(String(nb.saleAt));
-  });
+  }).map(function (g) {
+    g.upcoming = g.rows.filter(function (r) { return String(r.saleAt) >= now.slice(0, 10); });
+    return g;
+  }).sort(function (a, b) { return String(a.upcoming[0].saleAt).localeCompare(String(b.upcoming[0].saleAt)); });
   if (!list.length) return '目前沒有即將開賣的節目。傳售票公告截圖給我就可以建立搶票提醒 ✦';
-  const lines = list.slice(0, 12).map(function (g) {
-    const mine = g.watchers.indexOf(uid) >= 0 ? (g.done.indexOf(uid) >= 0 ? '｜已結束' : '｜👀 你要搶') : '';
-    return '🎫 ' + g.first.title + mine + '\n' + salesLines_(g.rows.filter(function (r) { return r.saleAt >= now.slice(0, 10); }))
-      + (g.first.notes ? '\n   ' + g.first.notes : '');
+  const entries = list.slice(0, 36).map(function (g) {
+    const next = g.upcoming[0];
+    const mine = g.watchers.indexOf(uid) >= 0;
+    return {
+      date: next.saleAt.slice(0, 10), time: next.saleAt.slice(11), top: g.first.artist, title: g.first.title,
+      lines: g.upcoming.map(function (r) { return '🎫 ' + r.phase + '　' + shortMD_(r.saleAt.slice(0, 10)) + ' ' + r.saleAt.slice(11) + (r.platform ? '｜' + r.platform : ''); })
+        .concat([g.first.notes ? '⚠ ' + g.first.notes : '']),
+      status: mine ? (g.done.indexOf(uid) >= 0 ? '已結束' : '👀 你要搶') : '', statusColor: C_ACCENT,
+    };
   });
   const join = list.filter(function (g) { return g.watchers.indexOf(uid) < 0; }).slice(0, 13);
-  return ask_('即將開賣（' + list.length + ' 個）\n\n' + lines.join('\n\n') + (join.length ? '\n\n想一起搶的可以點下面的按鈕。' : ''), 'watch',
-    join.map(function (g) { return [g.id, '我也要搶：' + g.first.title]; }));
+  return agendaMessage_('即將開賣', entries, { sub: '左邊是最近一波的開賣時間', foot: join.length ? '想一起搶的可以點下方按鈕。' : '',
+    step: 'watch', quick: join.map(function (g) { return [g.id, '我也要搶：' + g.first.title]; }) });
 }
 
 // 推播給指定的人；額度不夠就不傳（回傳 false），快用完時附上提醒
@@ -1911,27 +1980,21 @@ function tradeStart_() {
   return ask_('要產生哪一種文章？', 'trade', [['sell', '售票'], ['swap', '換票']]);
 }
 function tradeCandidates_() {
-  const today = today_();
-  const events = sheetRows_('events');
   const byId = {};
-  events.forEach(function (e) { byId[e.id] = e; });
-  const resale = unsoldTransfers_().map(function (t) { const it = transferItem_(t, byId[t.eventId]); it.tag = '轉賣中'; return it; });
-  const own = sheetRows_('ledger').filter(function (l) {
-    const ev = byId[l.eventId];
-    return l.category === 'ticket' && String(ev ? ev.startDate : l.date) >= today;
-  }).map(function (l) { const it = ownItem_(l, byId[l.eventId]); it.tag = '自己的票'; return it; });
-  const byDate = function (a, b) { return String(a.date).localeCompare(String(b.date)); };
-  return resale.sort(byDate).concat(own.sort(byDate)).slice(0, 30);
+  sheetRows_('events').forEach(function (e) { byId[e.id] = e; });
+  return unsoldTransfers_().map(function (t) { return transferItem_(t, byId[t.eventId]); })
+    .sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).slice(0, 30);
 }
+
 const shortMD_ = function (date) { return /^\d{4}-\d{2}-\d{2}$/.test(date) ? Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) : date; };
-const tradeLine_ = function (it) { return shortMD_(it.date) + ' ' + (it.artist || it.name) + ' ' + [it.area, it.row ? it.row + '排' : ''].join('') + ' ×' + it.count; };
+const tradeLine_ = function (it) { return shortMD_(it.date) + ' ' + (it.artist || it.name) + '\n   ' + [it.area, it.row ? it.row + '排' : ''].join('') + ' ×' + it.count; };
 
 function tradePick_(token, uid, mode) {
   const cands = tradeCandidates_();
-  if (!cands.length) return lineReply_(token, '目前沒有未來場次的票可以選。');
+  if (!cands.length) return lineReply_(token, '轉賣中沒有還沒賣出的票。要放進換售資訊的票，記票時選「要轉賣」就會出現在這裡。');
   saveTradeSession_(uid, { mode: mode, step: 'pick', cands: cands });
   lineReply_(token, '要' + TRADE_LABEL[mode] + '的是哪幾張？回覆編號（可多選，例如：1 3），或打「全部」。\n\n'
-    + cands.map(function (it, i) { return (i + 1) + '. ' + tradeLine_(it) + '（' + it.tag + '）'; }).join('\n'));
+    + cands.map(function (it, i) { return (i + 1) + '. ' + tradeLine_(it); }).join('\n'));
 }
 
 function onTradeText_(token, uid, t, text) {

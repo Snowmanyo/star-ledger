@@ -1147,17 +1147,19 @@ function pendingTickets_(ledger, events, today) {
 
 function upcomingText_(q) {
   const today = today_();
-  const events = sheetRows_('events'), ledger = sheetRows_('ledger');
-  const list = events.filter(function (e) { return String(e.startDate) >= today && matchEvent_(e, q) && inPeriod_(e.startDate, q); })
+  const list = sheetRows_('events').filter(function (e) { return String(e.startDate) >= today && matchEvent_(e, q) && inPeriod_(e.startDate, q); })
     .sort(function (a, b) { return String(a.startDate + a.startTime).localeCompare(String(b.startDate + b.startTime)); });
   if (!list.length) return '沒有符合的未來場次。';
+  // 每場：YYYY/MM/DD(星期) 演出時間／演出者｜活動名稱／地點
   const lines = list.slice(0, 15).map(function (e) {
-    const tickets = ledger.filter(function (l) { return l.eventId === e.id && l.category === 'ticket'; });
-    const status = !tickets.length ? '' : tickets.every(isPicked_) ? '｜已取票' : '｜🎫 未取票';
-    return '・' + md_(e.startDate) + (e.startTime ? ' ' + e.startTime : '') + ' ' + eventTitle_(e)
-      + '\n   ' + [e.venue, e.seat].filter(Boolean).join('｜') + status;
+    const day = e.startDate.replace(/-/g, '/') + '(' + WEEK_[new Date(e.startDate + 'T00:00:00Z').getUTCDay()] + ')';
+    return [
+      day + (e.startTime ? ' ' + e.startTime : ''),
+      [e.artist, e.name].filter(Boolean).join('｜'),
+      [e.city, e.venue].filter(Boolean).join(' '),
+    ].filter(Boolean).join('\n');
   });
-  return '接下來的場次（' + list.length + ' 場）\n\n' + lines.join('\n') + (list.length > 15 ? '\n…還有 ' + (list.length - 15) + ' 場，到網站「活動」頁看全部' : '');
+  return '接下來的場次（' + list.length + ' 場）\n\n' + lines.join('\n\n') + (list.length > 15 ? '\n…還有 ' + (list.length - 15) + ' 場，到網站「活動」頁看全部' : '');
 }
 
 function pickupListMessage_() {

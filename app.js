@@ -2261,7 +2261,7 @@ function compressImage(file) {
       const img = new Image();
       img.onerror = () => reject(new Error('這不是可讀取的圖片'));
       img.onload = () => {
-        const scale = Math.min(1, 2000 / Math.max(img.width, img.height));
+        const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
         const canvas = document.createElement('canvas');
         canvas.width = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
@@ -2269,7 +2269,7 @@ function compressImage(file) {
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const url = canvas.toDataURL('image/jpeg', 0.85);
+        const url = canvas.toDataURL('image/jpeg', 0.8);
         resolve({ url, dataBase64: url.split(',')[1] });
       };
       img.src = reader.result;
@@ -2308,6 +2308,7 @@ async function startScan(files) {
     return;
   }
   renderScanBody();
+  const t0 = Date.now();
   try {
     const res = await apiPost({
       action: 'scanTicket', test: scanTestQuota ? 'quota' : '',
@@ -2320,7 +2321,10 @@ async function startScan(files) {
   } catch (err) {
     scanTestQuota = false;
     s.status = 'error';
-    s.error = err.message === 'bad key' ? '共用密碼不對，請到「設定」確認共用密碼' : err.message;
+    const secs = Math.round((Date.now() - t0) / 1000);
+    s.error = err.message === 'bad key' ? '共用密碼不對，請到「設定」確認共用密碼'
+      : err instanceof TypeError ? `連線中斷（等了 ${secs} 秒）。可能是 AI 讀太久或網路不穩，請再試一次，或改成手動填寫`
+      : err.message;
   }
   if (scan !== s) return;
   saveScanDraft();

@@ -146,17 +146,32 @@ function scanTicket_(req) {
   (req.images || []).forEach(function (img) {
     parts.push({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.dataBase64 } });
   });
-  const body = JSON.stringify({
-    contents: [{ parts: parts }],
-    generationConfig: { responseMimeType: 'application/json', responseSchema: SCAN_SCHEMA, temperature: 0 },
-  });
-  let lastCode = 0;
-  for (let i = 0; i < GEMINI_MODELS.length; i++) {
-    const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODELS[i] + ':generateContent', {
-      method: 'post', contentType: 'application/json', payload: body,
+  // 讀票不需要深度思考；思考太久會讓手機瀏覽器等超過 60 秒而斷線
+  const config = { responseMimeType: 'application/json', responseSchema: SCAN_SCHEMA, temperature: 0, thinkingConfig: { thinkingLevel: 'low' } };
+  const call = function (model, cfg) {
+    return UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent', {
+      method: 'post', contentType: 'application/json', payload: JSON.stringify({ contents: [{ parts: parts }], generationConfig: cfg }),
       headers: { 'x-goog-api-key': apiKey }, muteHttpExceptions: true,
     });
+  };
+  let lastCode = 0;
+  let lastMsg = '';
+  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    let res;
+    try {
+      res = call(GEMINI_MODELS[i], config);
+      if (res.getResponseCode() === 400) { // 模型不支援 thinkingConfig 時，拿掉再試一次
+        const plain = Object.assign({}, config);
+        delete plain.thinkingConfig;
+        res = call(GEMINI_MODELS[i], plain);
+      }
+    } catch (err) {
+      lastCode = -1;
+      lastMsg = String(err.message || err);
+      continue; // 逾時或連線失敗，換下一個模型
+    }
     lastCode = res.getResponseCode();
+    if (lastCode !== 200) lastMsg = res.getContentText().slice(0, 300);
     if (lastCode === 200) {
       const out = JSON.parse(res.getContentText());
       const cand = (out.candidates || [])[0];
@@ -165,11 +180,11 @@ function scanTicket_(req) {
       if (!text) return { error: 'AI 沒有讀出內容，請換一張清楚的截圖或手動填寫' };
       return { ok: true, model: GEMINI_MODELS[i], data: JSON.parse(text) };
     }
-    if (lastCode === 400 || lastCode === 401 || lastCode === 403) break; // 金鑰或請求有問題，換模型也沒用
+    if (lastCode === 401 || lastCode === 403) break; // 金鑰有問題，換模型也沒用
   }
   if (lastCode === 429) return { error: '今天的 AI 免費次數用完了，可以明天再試，或先手動填寫' };
-  if (lastCode === 400 || lastCode === 401 || lastCode === 403) return { error: 'Gemini 金鑰無效或沒有權限（代碼 ' + lastCode + '），請確認指令碼屬性 GEMINI_API_KEY' };
-  return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '），請稍後再試或手動填寫' };
+  if (lastCode === 401 || lastCode === 403) return { error: 'Gemini 金鑰無效或沒有權限（代碼 ' + lastCode + '），請確認指令碼屬性 GEMINI_API_KEY' };
+  return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '）：' + lastMsg };
 }
 
 function json_(obj) {
@@ -191,7 +206,13 @@ function doGet(e) {
 function doPost(e) {
   const req = JSON.parse(e.postData.contents);
   if (!checkKey_(req.key)) return json_({ error: 'bad key' });
-  if (req.action === 'scanTicket') return json_(scanTicket_(req)); // 不寫試算表，不用排隊
+  if (req.action === 'scanTicket') { // 不寫試算表，不用排隊
+    try {
+      return json_(scanTicket_(req));
+    } catch (err) {
+      return json_({ error: '讀圖時發生錯誤：' + String(err.message || err) });
+    }
+  }
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {

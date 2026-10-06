@@ -49,6 +49,8 @@ Apps Script 左側「專案設定」（齒輪）→ 最下方「指令碼屬性�
 | `SHARED_KEY` | 自訂共用密碼；App 設定頁「共用密碼」填相同的值。給朋友用時務必設定 |
 | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) 建立的金鑰，掃票讀圖用（免費額度） |
 
+| `LINE_TOKEN` | （選用）LINE 機器人的 Channel access token |
+
 密碼和金鑰只存在你的 Apps Script 專案，不會出現在這個公開 repo 或網頁上。
 
 掃票使用 `gemini-3.8-flash`，額度用完或忙線時自動改用 `gemini-3.5-flash-lite`。外幣票的台幣金額用 open.er-api.com 當日匯率估算，並標示待確認。
@@ -65,3 +67,12 @@ python3 -m http.server 8642
 - 這個 repo 只有程式碼，沒有任何個人資料。
 - 你的資料只存在：你的 Google 試算表＋你手機瀏覽器的快取。
 - Apps Script 網址等連線設定存在瀏覽器 localStorage，不會進到 repo。
+
+## LINE 記票機器人（選用）
+
+同一個 Apps Script 也是 LINE 機器人的 Webhook：傳購票截圖給官方帳號，一問一答後確認卡片按「確認建檔」寫入同一份試算表。
+
+1. LINE Official Account Manager 建立官方帳號 → 啟用 Messaging API。
+2. LINE Developers 後台複製 Channel access token，存成指令碼屬性 `LINE_TOKEN`。
+3. Webhook URL 填 `網頁應用程式網址?line=共用密碼`，開啟「使用 Webhook」，關閉「自動回應訊息」。
+4. 加好友後輸入共用密碼（邀請碼）即可使用；Apps Script 編輯器執行 `testLine` 可檢查金鑰與已加入名單。

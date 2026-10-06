@@ -1842,12 +1842,14 @@ function openLedgerForm(existing, preset, backEventId) {
       ${fieldHtml('排', `<input id="l-ticketRow" value="${esc(l.ticketRow)}">`)}
       ${fieldHtml('座號', `<input id="l-ticketSeat" value="${esc(l.ticketSeat)}">`)}
     </div>
-    <label class="check-row">填寫購票帳號與領票資訊 <input type="checkbox" id="l-more-toggle" ${l.ticketAccount || l.ticketPickupDate || l.ticketOrderNumber ? 'checked' : ''}></label>
-    <div id="ticket-more" style="${l.ticketAccount || l.ticketPickupDate || l.ticketOrderNumber ? '' : 'display:none'}">
+    <label class="check-row">填寫購票帳號與領票資訊 <input type="checkbox" id="l-more-toggle" ${l.ticketAccount || l.ticketPickupDate || l.ticketOrderNumber || l.ticketPickupMethod ? 'checked' : ''}></label>
+    <div id="ticket-more" style="${l.ticketAccount || l.ticketPickupDate || l.ticketOrderNumber || l.ticketPickupMethod ? '' : 'display:none'}">
       <div class="field-row">
         ${fieldHtml('購票帳號', `<input id="l-ticketAccount" value="${esc(l.ticketAccount)}">`)}
         ${fieldHtml('訂單編號', `<input id="l-ticketOrderNumber" value="${esc(l.ticketOrderNumber || '')}">`)}
       </div>
+      ${fieldHtml('取票方式', `<input id="l-ticketPickupMethod" list="dl-pickup" placeholder="例：電子票、超商取票" value="${esc(l.ticketPickupMethod || '')}">`)}
+      <datalist id="dl-pickup">${datalistOptions(PICKUP_METHODS.concat(DB.ledger.map(x => x.ticketPickupMethod)))}</datalist>
       <div class="field-row">
         ${fieldHtml('領票日（不填＝隨時可領）', `<input id="l-ticketPickupDate" type="date" value="${esc(l.ticketPickupDate)}">`)}
         ${fieldHtml('或開演前Ｎ天可領', `<input id="l-pickupDays" type="number" inputmode="numeric" placeholder="例：3">`)}
@@ -2023,7 +2025,7 @@ function openLedgerForm(existing, preset, backEventId) {
   };
 
   $('#ledger-save').onclick = () => {
-    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount', 'ticketOrderNumber', 'ticketPickupDate'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
+    ['date', 'title', 'payer', 'paymentDetail', 'notes', 'ticketArea', 'ticketRow', 'ticketSeat', 'ticketPlatform', 'ticketAccount', 'ticketOrderNumber', 'ticketPickupMethod', 'ticketPickupDate'].forEach(k => { l[k] = $('#l-' + k).value.trim(); });
     l.ticketPickedUp = $('#l-ticketPickedUp').checked;
     l.category = $('#l-category').value;
     l.type = 'expense';
@@ -2209,6 +2211,15 @@ function openTransferForm(existing) {
 const TICKET_PLATFORMS = ['拓元', 'KKTIX', 'ibon', '年代', '寬宏', '遠大', 'NOL', 'Melon', 'YES24'];
 const PLATFORM_ALIAS = { interpark: 'NOL', 'nol ticket': 'NOL', 'nol interpark': 'NOL', tixcraft: '拓元', kham: '寬宏', 'era ticket': '年代' };
 const SCAN_PAY = [['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付'], ['cash', '現金']];
+const PICKUP_METHODS = ['電子票', '超商取票', '現場取票', '宅配'];
+const EVENT_KINDS = ['專場', '拼盤'];
+// 開演前 N 天 → 取票日
+function pickupFromDays(date, days) {
+  if (!date || !num(days)) return '';
+  const d = new Date(date + 'T00:00:00');
+  d.setDate(d.getDate() - num(days));
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 const SCAN_DRAFT_KEY = 'sl-scan-draft';
 const SCAN_MEM_KEY = 'sl-scan-mem';
 let scan = null;
@@ -2222,8 +2233,8 @@ function newScan() {
     answers: { purpose: '', platform: '', account: '', payMethod: '', payDetail: '', payer: '' },
     f: {
       eventName: '', artist: '', date: '', time: '', city: '', venue: '', ticketType: '', area: '', row: '', seat: '',
-      ticketCount: 1, currency: 'TWD', unitFace: '', unitFee: '', totalPaid: '', amountTwd: '', exchangeRate: '',
-      orderNumber: '', pickupDate: '',
+      ticketCount: 1, currency: 'TWD', unitFace: '', unitBenefit: '', unitFee: '', totalPaid: '', amountTwd: '', exchangeRate: '',
+      orderNumber: '', pickupDate: '', pickupDays: '', pickupMethod: '', eventType: '',
     },
   };
 }
@@ -2344,7 +2355,14 @@ async function applyScanResult(s, d) {
   f.currency = CURRENCIES.includes(str(d.currency).toUpperCase()) ? str(d.currency).toUpperCase() : 'TWD';
   f.unitFace = num(d.unitFace) || '';
   f.unitFee = num(d.unitFee) || '';
-  f.totalPaid = num(d.totalPaid) || (num(d.unitFace) + num(d.unitFee)) * f.ticketCount || '';
+  f.unitBenefit = num(d.unitBenefit) || '';
+  f.totalPaid = num(d.totalPaid) || (num(d.unitFace) + num(d.unitBenefit) + num(d.unitFee)) * f.ticketCount || '';
+  f.eventType = EVENT_KINDS.includes(str(d.eventType)) ? str(d.eventType) : '';
+  f.pickupMethod = PICKUP_METHODS.includes(str(d.pickupMethod)) ? str(d.pickupMethod) : '';
+  f.pickupDays = num(d.pickupDaysBefore) || '';
+  if (!f.pickupDate && f.pickupDays) f.pickupDate = pickupFromDays(f.date, f.pickupDays);
+  if (!a.payMethod && SCAN_PAY.some(([v]) => v === str(d.payMethod))) a.payMethod = str(d.payMethod);
+  if (!a.payDetail && str(d.payDetail)) a.payDetail = str(d.payDetail);
   const unsure = new Set();
   (Array.isArray(d.uncertain) ? d.uncertain : []).forEach(k => {
     if (k === 'seats') ['area', 'row', 'seat'].forEach(x => unsure.add(x));
@@ -2378,6 +2396,11 @@ function openScanSheet() {
       const field = el.closest('.field');
       if (field) field.classList.remove('unsure');
       if (el.dataset.f === 'amountTwd') scan.twdTouched = true;
+      if (el.dataset.f === 'pickupDays' || (el.dataset.f === 'date' && scan.f.pickupDays)) {
+        scan.f.pickupDate = pickupFromDays(scan.f.date, scan.f.pickupDays) || scan.f.pickupDate;
+        const pd = $('[data-f="pickupDate"]', body);
+        if (pd) pd.value = scan.f.pickupDate;
+      }
       if (el.dataset.f === 'totalPaid' && scan.f.currency !== 'TWD' && !scan.twdTouched) {
         scan.f.amountTwd = foreignToTwd(scan.f.currency, num(scan.f.totalPaid), num(scan.f.exchangeRate)) || '';
         const t = $('[data-f="amountTwd"]', body);
@@ -2508,6 +2531,7 @@ function renderScanBody() {
 
     ${ready ? `
     <div class="form-section">場次</div>
+    <div class="scan-chips">${EVENT_KINDS.map(k => scanChip('f:eventType', k, k, f.eventType === k)).join('')}</div>
     ${scanField('活動名稱', 'eventName')}
     ${scanField('表演者', 'artist')}
     <div class="field-row">${scanField('日期', 'date', 'type="date"')}${scanField('開演時間', 'time', 'type="time"')}</div>
@@ -2517,15 +2541,23 @@ function renderScanBody() {
     <div class="field-row">${scanField('票種', 'ticketType')}${scanField('張數', 'ticketCount', 'type="number" inputmode="numeric"')}</div>
     <div class="field-row">${scanField('區域', 'area')}${scanField('排', 'row')}${scanField('座號', 'seat')}</div>
     <div class="field-row">
-      <div class="field"><label>幣別</label>${selectHtml('scan-currency', CURRENCIES.map(c => [c, c]), f.currency).replace('<select ', '<select data-f="currency" ')}</div>
       ${scanField('單張票面', 'unitFace', 'type="number" inputmode="decimal"')}
+      ${scanField('單張福利', 'unitBenefit', 'type="number" inputmode="decimal"')}
       ${scanField('單張手續費', 'unitFee', 'type="number" inputmode="decimal"')}
     </div>
-    ${scanField(foreign ? `付款總額（${esc(f.currency)}）` : '付款總額（台幣）', 'totalPaid', 'type="number" inputmode="decimal"')}
+    <div class="field-row">
+      <div class="field" style="flex:.6"><label>幣別</label>${selectHtml('scan-currency', CURRENCIES.map(c => [c, c]), f.currency).replace('<select ', '<select data-f="currency" ')}</div>
+      ${scanField(foreign ? `付款總額（${esc(f.currency)}）` : '付款總額（台幣）', 'totalPaid', 'type="number" inputmode="decimal"')}
+    </div>
     ${foreign ? `
     <div class="field-row">${scanField('台幣實付', 'amountTwd', 'type="number" inputmode="numeric"')}${scanField(f.currency === 'USD' ? '匯率（USD 1 = TWD）' : `匯率（TWD 1 = ${esc(f.currency)}）`, 'exchangeRate', 'type="number" step="any" inputmode="decimal"')}</div>
     <div class="hint">台幣實付先用今天匯率估算，拿到信用卡帳單後可改成實際金額</div>` : ''}
-    <div class="field-row">${scanField('訂單編號', 'orderNumber')}${scanField('領票日', 'pickupDate', 'type="date"')}</div>
+    ${scanField('訂單編號', 'orderNumber')}
+
+    <div class="form-section">取票</div>
+    <div class="scan-chips">${PICKUP_METHODS.map(m => scanChip('f:pickupMethod', m, m, f.pickupMethod === m)).join('')}</div>
+    <div class="field-row">${scanField('開演前幾天可取票', 'pickupDays', 'type="number" inputmode="numeric" placeholder="例：3"')}${scanField('取票日', 'pickupDate', 'type="date"')}</div>
+    <div class="hint">填「開演前幾天」會自動算出取票日；隨時可取就兩格都留空</div>
 
     <div class="sheet-actions">
       <button class="btn primary" id="scan-save">確認並上傳</button>
@@ -2540,6 +2572,10 @@ function renderScanBody() {
     } else if (g === 'payer') {
       s.otherPayer = v === '__other';
       a.payer = s.otherPayer ? (payers.includes(a.payer) ? '' : a.payer) : v;
+    } else if (g.startsWith('f:')) {
+      const k = g.slice(2);
+      f[k] = f[k] === v ? '' : v; // 再點一次取消選擇
+      s.unsure = s.unsure.filter(x => x !== k);
     } else a[g] = v;
     saveScanDraft();
     renderScanBody();
@@ -2599,7 +2635,8 @@ async function commitScan(existingEvent) {
   const amountTwd = Math.round(num(foreign ? f.amountTwd : f.totalPaid));
   const notes = [];
   if (foreign) {
-    notes.push(`單張票面 ${fmtMoney(f.currency, f.unitFace)}` + (num(f.unitFee) ? `＋手續費 ${fmtMoney(f.currency, f.unitFee)}` : ''));
+    notes.push(`單張票面 ${fmtMoney(f.currency, f.unitFace)}` + (num(f.unitBenefit) ? `＋福利 ${fmtMoney(f.currency, f.unitBenefit)}` : '')
+      + (num(f.unitFee) ? `＋手續費 ${fmtMoney(f.currency, f.unitFee)}` : ''));
     if (!s.twdTouched) notes.push('台幣實付為估算，尚未對帳單確認');
   }
   let ok;
@@ -2607,7 +2644,7 @@ async function commitScan(existingEvent) {
   if (a.purpose === 'self') {
     const ev = existingEvent || {
       id: uid(), name: clean(f.eventName), artist: clean(f.artist), city: clean(f.city), venue: clean(f.venue),
-      startDate: f.date, startTime: f.time, endDate: '', eventNumber: '', originalDate: '', eventType: '', liveTour: '',
+      startDate: f.date, startTime: f.time, endDate: '', eventNumber: '', originalDate: '', eventType: f.eventType || '', liveTour: '',
       seriesEvent: '', seat: '', ticketPriceTwd: '', guest: '', payer: '', settled: false, notes: '', createdAt: today(), coverUrl: '',
     };
     if (existingEvent) {
@@ -2615,6 +2652,7 @@ async function commitScan(existingEvent) {
       if (!ev.venue && clean(f.venue)) ev.venue = clean(f.venue);
       if (!ev.city && clean(f.city)) ev.city = clean(f.city);
       if (!ev.artist && clean(f.artist)) ev.artist = clean(f.artist);
+      if (!ev.eventType && f.eventType) ev.eventType = f.eventType;
     }
     const l = {
       id: uid(), type: 'expense', category: 'ticket', date: f.date || today(), title: '票券 - ' + ev.name, eventId: ev.id,
@@ -2622,8 +2660,8 @@ async function commitScan(existingEvent) {
       exchangeRate: foreign ? num(f.exchangeRate) || '' : '', payer: a.payer, paymentMethod: a.payMethod, paymentDetail: a.payDetail,
       counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '', notes: notes.join('｜'),
       ticketType: clean(f.ticketType), ticketArea: clean(f.area), ticketRow: clean(f.row), ticketSeat: clean(f.seat),
-      attendee: '', ticketStatus: '', ticketFaceTwd: foreign ? '' : num(f.unitFace) || '', ticketBenefitTwd: '',
-      ticketFeeTwd: foreign ? '' : num(f.unitFee) || '', ticketPlatform: a.platform, ticketAccount: a.account, ticketCount: count,
+      attendee: '', ticketStatus: '', ticketFaceTwd: foreign ? '' : num(f.unitFace) || '',
+      ticketFeeTwd: foreign ? '' : num(f.unitFee) || '', ticketBenefitTwd: foreign ? '' : num(f.unitBenefit) || '', ticketPickupMethod: f.pickupMethod, ticketPlatform: a.platform, ticketAccount: a.account, ticketCount: count,
       splits: CFG.myName && amountTwd ? [{ name: CFG.myName, count: 1, amountTwd: Math.round(amountTwd / count), settled: false }] : [],
       ticketPickupDate: f.pickupDate, ticketPickedUp: false, ticketOrderNumber: clean(f.orderNumber), createdAt: today(),
     };
@@ -2638,7 +2676,8 @@ async function commitScan(existingEvent) {
       (a.payMethod || a.payDetail) && '付款：' + [PAY_LABEL[a.payMethod] || '', a.payDetail].filter(Boolean).join(' '),
       a.payer && '付款人：' + a.payer, clean(f.orderNumber) && '訂單：' + clean(f.orderNumber),
       f.time && '開演 ' + f.time, clean(f.venue) && [clean(f.city), clean(f.venue)].filter(Boolean).join(' '),
-      clean(f.ticketType) && '票種：' + clean(f.ticketType), f.pickupDate && '領票日 ' + f.pickupDate,
+      clean(f.ticketType) && '票種：' + clean(f.ticketType), f.eventType,
+      f.pickupMethod && '取票：' + f.pickupMethod, f.pickupDate && '領票日 ' + f.pickupDate,
     ].filter(Boolean);
     const t = {
       id: uid(), date: f.date || today(), eventId: existingEvent ? existingEvent.id : '', kind: '轉賣', person: '', title,

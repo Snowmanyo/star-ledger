@@ -332,7 +332,7 @@ const LINE_HELP = [
   '🎫 搶票：傳主辦單位的售票公告截圖給我，確認後會在開賣前一天晚上和開賣前 30 分鐘提醒要搶的人。',
   '🔎 查詢：用下方選單，或直接問我，例如「11月有什麼場」「DAY6 今年看了幾場」「今年花多少」。',
   '⏰ 提醒：可取票當天會提醒大家；打「提醒設定」看時間，打「取票提醒改成 9:30」「轉賣提醒改成週五 21:00」「轉賣提醒關掉」修改。',
-  '🗓 行事曆：按選單的「行事曆」看 Apple 行事曆訂閱方式。',
+  '🗓 Apple 行事曆：打「行事曆」拿訂閱網址，iPhone 設定 → App → 行事曆 → 行事曆帳號 → 加入帳號 → 其他 → 加入訂閱的行事曆，貼上網址。所有場次和開賣時間會自動出現。',
   '📝 換售資訊：選售票或換票、挑要放的票，就會產生可以直接複製的文章；打「售票備註」「換票備註」看或修改固定備註。',
   '💰 花費：打「本月花費」或直接問「今年花多少」。',
 ].join('\n\n');
@@ -858,9 +858,10 @@ function onLinePostback_(token, uid, me, pb) {
   if (['watch', 'unwatch', 'ogot', 'omiss'].indexOf(pb.a) >= 0) return onsaleMark_(token, uid, pb.a, pb.v);
   if (pb.a === 'onotify') return onsaleNotify_(token, uid, me, pb.v);
   if (pb.a === 'trade') return tradePick_(token, uid, pb.v === 'swap' ? 'swap' : 'sell');
-  if (pb.a === 'tnote' || pb.a === 'tdeliv' || pb.a === 'tplace') {
+  if (pb.a === 'tnote' || pb.a === 'tdeliv' || pb.a === 'tplace' || pb.a === 'tsel' || pb.a === 'tpick') {
     const tr = tradeSession_(uid);
     if (!tr) return lineReply_(token, '這篇已經結束或放太久了，請重新按「換售資訊」。');
+    if (pb.a === 'tsel' || pb.a === 'tpick') return tr.step === 'pick' ? tradeToggle_(token, uid, tr, pb.v) : lineReply_(token, '已經選好票了，請繼續回答上面的問題。');
     if (pb.a === 'tdeliv') return tradeSetDelivery_(token, uid, tr, pb.v === 'meet' ? 'meet' : 'code');
     if (pb.a === 'tplace') return tradeSetPlace_(token, uid, tr, pb.v);
     return tradeFinish_(token, uid, tr, '');
@@ -1194,7 +1195,9 @@ function agendaRow_(e) {
     ftext_(e.title || '—', 'sm', C_INK, { weight: 'bold', maxLines: 3 }),
   ].concat((e.lines || []).filter(Boolean).map(function (x) { return ftext_(x, 'xs', C_MUTED); }))
     .concat(e.status ? [ftext_(e.status, 'xs', e.statusColor || C_ACCENT, { weight: 'bold' })] : []).filter(Boolean) };
-  return { type: 'box', layout: 'horizontal', spacing: 'md', margin: 'lg', contents: [left, right] };
+  const row = { type: 'box', layout: 'horizontal', spacing: 'md', margin: 'lg', contents: [left, right] };
+  if (e.action) row.action = e.action; // 整筆可以點
+  return row;
 }
 function agendaMessage_(title, entries, opts) {
   opts = opts || {};
@@ -1618,11 +1621,13 @@ function setupRichMenu_() {
   const head = { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') };
   const old = PROPS.getProperty('RICHMENU_ID');
   if (old) UrlFetchApp.fetch('https://api.line.me/v2/bot/richmenu/' + old, { method: 'delete', headers: head, muteHttpExceptions: true });
-  const labels = ['未來場次', '待取票', '即將開賣', '換售資訊', '轉賣中', '行事曆', '提醒設定', '說明'];
+  const labels = ['未來場次', '待取票', '即將開賣', '換售資訊', '轉賣中', '提醒設定', '說明'];
   const menu = {
     size: { width: 2500, height: 843 }, selected: true, name: '追星記票', chatBarText: '選單',
     areas: labels.map(function (label, i) {
-      return { bounds: { x: (i % 4) * 625, y: i < 4 ? 0 : 421, width: 625, height: i < 4 ? 421 : 422 }, action: { type: 'message', text: label } };
+      // 上排 4 格、下排 3 格
+      const b = i < 4 ? { x: i * 625, y: 0, width: 625, height: 421 } : { x: (i - 4) * 833, y: 421, width: i === 6 ? 834 : 833, height: 422 };
+      return { bounds: b, action: { type: 'message', text: label } };
     }),
   };
   const res = lineApi_('https://api.line.me/v2/bot/richmenu', menu);
@@ -1992,9 +1997,45 @@ const tradeLine_ = function (it) { return shortMD_(it.date) + ' ' + (it.artist |
 function tradePick_(token, uid, mode) {
   const cands = tradeCandidates_();
   if (!cands.length) return lineReply_(token, '轉賣中沒有還沒賣出的票。要放進換售資訊的票，記票時選「要轉賣」就會出現在這裡。');
-  saveTradeSession_(uid, { mode: mode, step: 'pick', cands: cands });
-  lineReply_(token, '要' + TRADE_LABEL[mode] + '的是哪幾張？回覆編號（可多選，例如：1 3），或打「全部」。\n\n'
-    + cands.map(function (it, i) { return (i + 1) + '. ' + tradeLine_(it); }).join('\n'));
+  saveTradeSession_(uid, { mode: mode, step: 'pick', cands: cands, sel: [] });
+  const entries = cands.map(function (it, i) {
+    return {
+      date: it.date, time: it.time, top: (i + 1) + '｜' + (it.artist || ''), title: it.name,
+      lines: [pre_('🎫', [[it.area, it.row ? it.row + '排' : ''].join(''), '×' + it.count + ' 張'].filter(Boolean).join('　'))],
+      status: '點這筆選擇', statusColor: C_ACCENT,
+      action: { type: 'postback', label: '選擇', data: 'a=tsel&v=' + i, displayText: '選 ' + shortMD_(it.date) + ' ' + (it.artist || it.name) },
+    };
+  });
+  lineReply_(token, agendaMessage_('要' + TRADE_LABEL[mode] + '哪幾張？', entries, {
+    sub: '點票就會選起來（可以選多張），選好按下方「完成」', step: 'tpick',
+    quick: [['done', '完成'], ['all', '全部選'], ['clear', '重選']],
+  }));
+}
+// 點選／取消一張票，回覆目前選了哪些
+function tradeToggle_(token, uid, t, v) {
+  if (v === 'clear') t.sel = [];
+  else if (v === 'all') t.sel = t.cands.map(function (x, i) { return i; });
+  else if (v !== 'done') {
+    const i = Number(v);
+    if (i >= 0 && i < t.cands.length) t.sel = t.sel.indexOf(i) >= 0 ? t.sel.filter(function (x) { return x !== i; }) : t.sel.concat([i]);
+  }
+  if (v === 'done' || v === 'all') {
+    if (!t.sel.length) return lineReply_(token, ask_('還沒選任何一張，請先點卡片上的票。', 'tpick', [['all', '全部選']]));
+    return tradePicked_(token, uid, t, t.sel.sort(function (a, b) { return a - b; }).map(function (i) { return t.cands[i]; }));
+  }
+  saveTradeSession_(uid, t);
+  const list = t.sel.sort(function (a, b) { return a - b; }).map(function (i) { return '・' + tradeLine_(t.cands[i]).replace('\n   ', '｜'); });
+  lineReply_(token, ask_(list.length ? '已選 ' + list.length + ' 筆：\n' + list.join('\n') + '\n\n可以繼續點其他票，選好按「完成」。' : '目前沒有選任何票。',
+    'tpick', [['done', '完成（' + list.length + '）'], ['clear', '重選']]));
+}
+function tradePicked_(token, uid, t, picked) {
+  t.picked = picked;
+  if (t.mode === 'swap') {
+    t.step = 'want';
+    saveTradeSession_(uid, t);
+    return lineReply_(token, '想換什麼？例如「5/17 孫燕姿 3880以下*2」');
+  }
+  return tradeAskDelivery_(token, uid, t);
 }
 
 function onTradeText_(token, uid, t, text) {
@@ -2002,14 +2043,8 @@ function onTradeText_(token, uid, t, text) {
   if (t.step === 'pick') {
     const nums = /全部/.test(text) ? t.cands.map(function (x, i) { return i + 1; }) : (text.match(/\d+/g) || []).map(Number);
     const picked = nums.filter(function (n, i) { return n >= 1 && n <= t.cands.length && nums.indexOf(n) === i; }).map(function (n) { return t.cands[n - 1]; });
-    if (!picked.length) return lineReply_(token, '請回覆清單上的編號，例如：1 3');
-    t.picked = picked;
-    if (t.mode === 'swap') {
-      t.step = 'want';
-      saveTradeSession_(uid, t);
-      return lineReply_(token, '想換什麼？例如「5/17 孫燕姿 3880以下*2」');
-    }
-    return tradeAskDelivery_(token, uid, t);
+    if (!picked.length) return lineReply_(token, '請點卡片上的票來選，或回覆編號（例如：1 3）。');
+    return tradePicked_(token, uid, t, picked);
   }
   if (t.step === 'want') {
     t.want = text;

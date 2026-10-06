@@ -2326,6 +2326,7 @@ async function startScan(files) {
       images: s.images.map(i => ({ mimeType: 'image/jpeg', dataBase64: i.dataBase64 })),
     });
     scanTestQuota = false;
+    if (res.data && res.data.docType === 'onsale') throw new Error('這張看起來是售票公告，不是購票訂單。搶票提醒請把截圖傳給 LINE 機器人建立。');
     s.model = res.model || '';
     s.duplicate = res.duplicate || null;
     await applyScanResult(s, res.data || {});

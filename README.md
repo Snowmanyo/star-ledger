@@ -76,3 +76,6 @@ python3 -m http.server 8642
 2. LINE Developers 後台複製 Channel access token，存成指令碼屬性 `LINE_TOKEN`。
 3. Webhook URL 填 `網頁應用程式網址?line=共用密碼`，開啟「使用 Webhook」，關閉「自動回應訊息」。
 4. 加好友後輸入共用密碼（邀請碼）即可使用；Apps Script 編輯器執行 `testLine` 可檢查金鑰與已加入名單。
+5. Apps Script 編輯器執行一次 `setupBot`：建立提醒排程（每 5 分鐘檢查）與聊天室下方選單（圖片 `line-richmenu.png`）。
+
+機器人功能：習慣記法（試算表 `aliases` 分頁）、重複訂單警告、取票提醒（預設當天 11:50）、轉賣週提醒（預設週四 20:00）、查詢（未來場次、待取票、花費、看過幾場、轉賣中）、Apple 行事曆訂閱（`網頁應用程式網址?ics=共用密碼`）。

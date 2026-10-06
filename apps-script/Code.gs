@@ -21,6 +21,7 @@ const TABLES = {
   events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt', 'coverUrl', 'startTime'],
   ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt', 'settled', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketPlatform', 'ticketAccount', 'ticketCount', 'splits', 'ticketPickupDate', 'ticketPickedUp', 'ticketOrderNumber', 'ticketPickupMethod'],
   transfers: ['id', 'date', 'eventId', 'kind', 'person', 'ticketCount', 'ticketArea', 'ticketRow', 'ticketSeat', 'costTwd', 'amountTwd', 'settled', 'notes', 'createdAt', 'title', 'feeTwd'],
+  aliases: ['id', 'field', 'from', 'to', 'createdBy', 'createdAt'], // 習慣記法：讀到 from 一律記成 to
 };
 
 function setup_() {
@@ -151,11 +152,46 @@ function scanTicket_(req) {
 }
 
 function readTicketImages_(images) {
-  const parts = [{ text: SCAN_PROMPT.replace('{TODAY}', today_()) }];
+  const parts = [{ text: SCAN_PROMPT.replace('{TODAY}', today_()) + knownNamesText_() }];
   images.forEach(function (img) {
     parts.push({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.dataBase64 } });
   });
-  return gemini_(parts, SCAN_SCHEMA);
+  const r = gemini_(parts, SCAN_SCHEMA);
+  if (r.ok) {
+    applyAliases_(r.data);
+    r.duplicate = findOrder_(r.data.orderNumber);
+  }
+  return r;
+}
+
+const ALIAS_FIELDS = { venue: '場館', city: '城市', artist: '表演者', eventName: '活動名稱' };
+const sheetRows_ = function (name) { return ss_().getSheetByName(name) ? readTable_(name) : []; };
+
+// 把總帳裡用過的寫法交給 AI，讓它盡量沿用
+function knownNamesText_() {
+  const events = sheetRows_('events').slice().sort(function (a, b) { return String(b.startDate).localeCompare(String(a.startDate)); });
+  const pick = function (key) {
+    const out = [];
+    events.forEach(function (e) { const v = String(e[key] || '').trim(); if (v && out.indexOf(v) < 0 && out.length < 40) out.push(v); });
+    return out.join('、');
+  };
+  const venues = pick('venue'), artists = pick('artist');
+  if (!venues && !artists) return '';
+  return '\n- 以下是使用者習慣的寫法，讀到同一個場館或表演者時請沿用這些寫法：\n  場館：' + venues + '\n  表演者：' + artists;
+}
+function applyAliases_(data) {
+  sheetRows_('aliases').forEach(function (a) {
+    if (ALIAS_FIELDS[a.field] && data[a.field] && normName_(data[a.field]) === normName_(a.from)) data[a.field] = a.to;
+  });
+  return data;
+}
+function findOrder_(orderNumber) {
+  const no = String(orderNumber || '').trim();
+  if (!no) return null;
+  const hit = sheetRows_('ledger').filter(function (l) { return l.ticketOrderNumber === no; })[0];
+  if (hit) return { title: hit.title, date: hit.date };
+  const tr = sheetRows_('transfers').filter(function (t) { return String(t.notes || '').indexOf('訂單：' + no) >= 0; })[0];
+  return tr ? { title: tr.title + '（轉賣）', date: tr.date } : null;
 }
 
 function gemini_(parts, schema) {
@@ -224,6 +260,7 @@ function checkKey_(key) {
 }
 
 function doGet(e) {
+  if (e.parameter.ics !== undefined) return calendarFeed_(e.parameter.ics); // Apple 行事曆訂閱
   if (!checkKey_(e.parameter.key)) return json_({ error: 'bad key' });
   setup_();
   const out = {};
@@ -270,7 +307,12 @@ const OPTIONAL_STEPS = ['account', 'payDetail', 'pickup']; // 可以跳過的題
 const AI_FIELDS = ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'eventType', 'ticketType', 'area', 'row', 'seat',
   'ticketCount', 'currency', 'unitFace', 'unitBenefit', 'unitFee', 'totalPaid', 'orderNumber', 'pickupDate', 'pickupMethod',
   'platform', 'account', 'payMethod', 'payDetail'];
-const LINE_HELP = '傳購票截圖給我（同一筆訂單可一次傳 2～3 張）→ 回答幾個問題 → 確認卡片按「確認建檔」就完成了 ✦\n隨時輸入「取消」可以放棄目前這筆。';
+const LINE_HELP = [
+  '📸 記票：傳購票截圖給我（同一筆訂單可一次傳 2～3 張）→ 回答幾個問題 → 確認卡片按「確認建檔」。隨時輸入「取消」可以放棄目前這筆。',
+  '🔎 查詢：用下方選單，或直接問我，例如「11月有什麼場」「DAY6 今年看了幾場」「今年花多少」。',
+  '⏰ 提醒：可取票當天會提醒大家；打「提醒設定」看時間，打「取票提醒改成 9:30」「轉賣提醒改成週五 21:00」「轉賣提醒關掉」修改。',
+  '🗓 行事曆：按選單的「行事曆」看 Apple 行事曆訂閱方式。',
+].join('\n\n');
 
 const num_ = function (v) {
   const n = Number(String(v == null ? '' : v).replace(/,/g, ''));
@@ -448,6 +490,12 @@ function startDraft_(token, uid, s) {
   s.d = draftFrom_(r.data);
   s.asked = {};
   s.edited = [];
+  if (r.duplicate) {
+    s.step = 'dupOrder';
+    saveLineSession_(uid, s);
+    return lineReply_(token, ['讀到了 ✦\n' + summaryText_(s.d), ask_('⚠ 這筆訂單（編號 ' + s.d.orderNumber + '）好像已經記過了：\n'
+      + r.duplicate.title + (r.duplicate.date ? '（' + r.duplicate.date + '）' : ''), 'dupord', [['go', '還是要記'], ['cancel', '取消']])]);
+  }
   lineReply_(token, ['讀到了 ✦\n' + summaryText_(s.d), nextMessage_(uid, s)]);
 }
 
@@ -711,14 +759,17 @@ function editDraft_(d, text) {
   const changes = r.data || {};
   if (!changes.understood) return { changed: [] };
   const changed = [];
+  const offers = [];
   Object.keys(changes).forEach(function (k) {
     if (k === 'understood' || !(k in view)) return;
+    const before = d[k];
     d[k] = typeof changes[k] === 'number' ? changes[k] : str_(changes[k]);
     changed.push(k);
+    if (ALIAS_FIELDS[k] && str_(before) && d[k] && normName_(before) !== normName_(d[k])) offers.push({ f: k, from: str_(before), to: d[k] });
   });
   if (changed.some(function (k) { return ['currency', 'totalPaid'].indexOf(k) >= 0; }) && changed.indexOf('amountTwd') < 0) fillTwd_(d);
   if (changed.indexOf('amountTwd') >= 0) d.twdEstimated = false;
-  return { changed: changed };
+  return { changed: changed, offers: offers };
 }
 
 function onLineText_(token, uid, me, users, text) {
@@ -728,13 +779,17 @@ function onLineText_(token, uid, me, users, text) {
     return lineReply_(token, s && s.d ? '已取消這筆，沒有建檔。' : '目前沒有進行中的紀錄。');
   }
   if (/^(說明|help|\?|？)$/i.test(text)) return lineReply_(token, LINE_HELP);
+  const cmd = lineCommand_(text, me);
+  if (cmd) return lineReply_(token, cmd);
   if (!s) {
     if (PROPS.getProperty('ld_' + uid)) {
       PROPS.deleteProperty('ld_' + uid);
       return lineReply_(token, '上一筆放太久，已經自動清除了，請重新傳截圖 🙏');
     }
-    return lineReply_(token, '傳購票截圖給我就可以開始記錄 ✦');
+    lineLoading_(uid);
+    return lineReply_(token, answerQuestion_(text, me));
   }
+  if (s.step === 'dupOrder') return lineReply_(token, ask_('這筆訂單好像已經記過了，要繼續記嗎？', 'dupord', [['go', '還是要記'], ['cancel', '取消']]));
   if (s.step === 'name') return setName_(token, uid, users, text);
   if (s.step === 'supplement') return lineReply_(token, ask_('請先選擇這張新截圖要怎麼處理：', 'supp', [['merge', '補充到這筆'], ['new', '當成新的一筆']]));
   if (s.step === 'confirm' || s.step === 'dupe') {
@@ -744,7 +799,12 @@ function onLineText_(token, uid, me, users, text) {
     if (!r.changed.length) return lineReply_(token, '看不太懂要改哪裡，可以說得更具體一點，例如「座位改成5排18號」「付款人改成 Jhen」。');
     s.edited = (s.edited || []).concat(r.changed);
     delete s.eventChoice;
-    return lineReply_(token, ['已修改 ✦', nextMessage_(uid, s)]);
+    const out = ['已修改 ✦', nextMessage_(uid, s)];
+    if (r.offers.length) {
+      out.push(ask_('以後都這樣記嗎？\n' + r.offers.map(function (o) { return ALIAS_FIELDS[o.f] + '：' + o.from + ' → ' + o.to; }).join('\n'),
+        'alias', [[JSON.stringify(r.offers), '好'], ['no', '只有這次']]));
+    }
+    return lineReply_(token, out);
   }
   if (LINE_STEPS.indexOf(s.step) >= 0) {
     if (applyAnswer_(s, s.step, text, true)) return lineReply_(token, nextMessage_(uid, s));
@@ -756,10 +816,19 @@ function onLineText_(token, uid, me, users, text) {
 }
 
 function onLinePostback_(token, uid, me, pb) {
+  if (pb.a === 'picked') return markPicked_(token, pb.v);
+  if (pb.a === 'alias') return saveAliases_(token, pb.v, me);
   const s = lineSession_(uid);
   if (!s || !s.d) return lineReply_(token, '這筆已經結束或放太久被清除了，請重新傳截圖 🙏');
   if (LINE_STEPS.indexOf(pb.a) >= 0) {
     if (!applyAnswer_(s, pb.a, pb.v, false)) return lineReply_(token, question_(pb.a, s.d));
+    return lineReply_(token, nextMessage_(uid, s));
+  }
+  if (pb.a === 'dupord') {
+    if (pb.v !== 'go') {
+      clearLineSession_(uid);
+      return lineReply_(token, '已取消這筆，沒有建檔。');
+    }
     return lineReply_(token, nextMessage_(uid, s));
   }
   if (pb.a === 'supp') {
@@ -970,4 +1039,405 @@ function testLine() {
   const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/info', { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
   Logger.log('LINE → ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 300));
   Logger.log('已加入的使用者：' + JSON.stringify(lineUsers_()));
+}
+
+/* ---------- 習慣記法、已取票 ---------- */
+function saveAliases_(token, v, me) {
+  if (v === 'no') return lineReply_(token, '好，只有這次。');
+  let offers = [];
+  try { offers = JSON.parse(v); } catch (err) { offers = []; }
+  if (!offers.length) return lineReply_(token, '沒有要記住的寫法。');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    setup_();
+    const rows = readTable_('aliases');
+    const out = offers.map(function (o) {
+      const old = rows.filter(function (a) { return a.field === o.f && normName_(a.from) === normName_(o.from); })[0];
+      return { id: old ? old.id : newId_(), field: o.f, from: o.from, to: o.to, createdBy: me.name || '', createdAt: today_() };
+    });
+    writeRows_('aliases', out);
+  } finally {
+    lock.releaseLock();
+  }
+  lineReply_(token, '記住了 ✦ 以後會自動換成：\n' + offers.map(function (o) { return o.from + ' → ' + o.to; }).join('\n')
+    + '\n（對照表在試算表「aliases」分頁，可以直接修改或刪除）');
+}
+
+function markPicked_(token, ledgerId) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let row;
+  try {
+    row = readTable_('ledger').filter(function (l) { return l.id === ledgerId; })[0];
+    if (row) {
+      row.ticketPickedUp = 'true';
+      writeRows_('ledger', [row]);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  lineReply_(token, row ? '已標記「' + row.title + '」已取票 ✦' : '找不到這張票，可能已經被刪除了。');
+}
+
+/* ---------- 查詢 ---------- */
+const CAT_LABEL_ = { ticket: '票券', transport: '交通', lodging: '住宿', food: '餐飲', merch: '周邊', other: '其他' };
+const WEEK_ = '日一二三四五六';
+const md_ = function (date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date || '日期未定';
+  return Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) + '（' + WEEK_[new Date(date + 'T00:00:00Z').getUTCDay()] + '）';
+};
+const eventTitle_ = function (e) {
+  return (e.eventType === '拼盤' || !e.artist || String(e.name).indexOf(e.artist) >= 0) ? e.name : e.artist + ' - ' + e.name;
+};
+const isPicked_ = function (l) { return String(l.ticketPickedUp) === 'true'; };
+function matchEvent_(e, q) {
+  const hay = normName_([e.name, e.artist, e.venue, e.liveTour, e.city].join(' '));
+  const keys = [q.artist, q.keyword].map(normName_).filter(Boolean);
+  return keys.every(function (k) { return hay.indexOf(k) >= 0; });
+}
+function inPeriod_(date, q) {
+  date = String(date || '');
+  if (q.year && date.slice(0, 4) !== String(q.year)) return false;
+  if (q.month && Number(date.slice(5, 7)) !== Number(q.month)) return false;
+  return true;
+}
+function pendingTickets_(ledger, events, today) {
+  const byId = {};
+  events.forEach(function (e) { byId[e.id] = e; });
+  return ledger.filter(function (l) {
+    if (l.category !== 'ticket' || isPicked_(l)) return false;
+    const ev = byId[l.eventId];
+    return String(ev ? ev.startDate || '9999' : l.date || '9999') >= today;
+  }).map(function (l) { return { l: l, ev: byId[l.eventId] }; });
+}
+
+function upcomingText_(q) {
+  const today = today_();
+  const events = sheetRows_('events'), ledger = sheetRows_('ledger');
+  const list = events.filter(function (e) { return String(e.startDate) >= today && matchEvent_(e, q) && inPeriod_(e.startDate, q); })
+    .sort(function (a, b) { return String(a.startDate + a.startTime).localeCompare(String(b.startDate + b.startTime)); });
+  if (!list.length) return '沒有符合的未來場次。';
+  const lines = list.slice(0, 15).map(function (e) {
+    const tickets = ledger.filter(function (l) { return l.eventId === e.id && l.category === 'ticket'; });
+    const status = !tickets.length ? '' : tickets.every(isPicked_) ? '｜已取票' : '｜🎫 未取票';
+    return '・' + md_(e.startDate) + (e.startTime ? ' ' + e.startTime : '') + ' ' + eventTitle_(e)
+      + '\n   ' + [e.venue, e.seat].filter(Boolean).join('｜') + status;
+  });
+  return '接下來的場次（' + list.length + ' 場）\n\n' + lines.join('\n') + (list.length > 15 ? '\n…還有 ' + (list.length - 15) + ' 場，到網站「活動」頁看全部' : '');
+}
+
+function pickupListMessage_() {
+  const today = today_();
+  const items = pendingTickets_(sheetRows_('ledger'), sheetRows_('events'), today).sort(function (a, b) {
+    return String(a.l.ticketPickupDate || '0000').localeCompare(String(b.l.ticketPickupDate || '0000'));
+  });
+  if (!items.length) return '目前沒有待取的票 ✦';
+  const lines = items.map(function (x) {
+    const p = x.l.ticketPickupDate;
+    const when = !p || p <= today ? '✅ 現在可取' : '⏳ ' + md_(p) + ' 起';
+    return '・' + (x.ev ? eventTitle_(x.ev) : x.l.title) + '\n   ' + [when, x.l.ticketPickupMethod, x.l.ticketPlatform, x.l.ticketAccount].filter(Boolean).join('｜');
+  });
+  return ask_('待取票（' + items.length + ' 張）\n\n' + lines.join('\n') + '\n\n取完票可以點下面的按鈕標記。', 'picked',
+    items.slice(0, 13).map(function (x) { return [x.l.id, '已取：' + (x.ev ? x.ev.name : x.l.title)]; }));
+}
+
+function spendText_(q, me) {
+  const today = today_();
+  if (!q.year && !q.month) { q.year = Number(today.slice(0, 4)); q.month = Number(today.slice(5, 7)); }
+  const events = sheetRows_('events');
+  const byId = {};
+  events.forEach(function (e) { byId[e.id] = e; });
+  const rows = sheetRows_('ledger').filter(function (l) {
+    if (l.type && l.type !== 'expense') return false;
+    if (!inPeriod_(l.date, q)) return false;
+    if (q.artist || q.keyword) { const ev = byId[l.eventId]; return ev ? matchEvent_(ev, q) : matchEvent_({ name: l.title }, q); }
+    return true;
+  });
+  const label = (q.year ? q.year + ' 年' : '') + (q.month ? ' ' + q.month + ' 月' : '') + (q.artist || q.keyword ? '（' + (q.artist || q.keyword) + '）' : '');
+  if (!rows.length) return label + '沒有花費紀錄。';
+  const total = rows.reduce(function (t, l) { return t + num_(l.amountTwd); }, 0);
+  const mine = me.name ? rows.reduce(function (t, l) { return t + ownShare_(l, me.name); }, 0) : 0;
+  const byCat = {};
+  rows.forEach(function (l) { const c = CAT_LABEL_[l.category] || '其他'; byCat[c] = (byCat[c] || 0) + num_(l.amountTwd); });
+  return label + '花費\n\n總額 TWD ' + total.toLocaleString('en-US') + '（' + rows.length + ' 筆）'
+    + (me.name ? '\n其中 ' + me.name + ' 的份 TWD ' + mine.toLocaleString('en-US') : '') + '\n\n'
+    + Object.keys(byCat).map(function (c) { return c + '　TWD ' + byCat[c].toLocaleString('en-US'); }).join('\n');
+}
+
+function countText_(q) {
+  const today = today_();
+  const events = sheetRows_('events').filter(function (e) { return matchEvent_(e, q) && inPeriod_(e.startDate, q); });
+  const seen = events.filter(function (e) { return e.startDate && e.startDate <= today; }).sort(function (a, b) { return String(b.startDate).localeCompare(String(a.startDate)); });
+  const future = events.filter(function (e) { return e.startDate > today; });
+  const label = (q.artist || q.keyword || '全部') + (q.year ? '（' + q.year + ' 年）' : '');
+  return label + '：已經看過 ' + seen.length + ' 場' + (future.length ? '，還有 ' + future.length + ' 場在後面' : '')
+    + (seen.length ? '\n\n最近的：\n' + seen.slice(0, 8).map(function (e) { return '・' + e.startDate + ' ' + eventTitle_(e); }).join('\n') : '');
+}
+
+function unsoldTransfers_() {
+  const today = today_();
+  return sheetRows_('transfers').filter(function (t) {
+    return String(t.settled) !== 'true' && !num_(t.amountTwd) && String(t.date || '9999') >= today && ['退票', '換票'].indexOf(t.kind) < 0;
+  }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
+}
+function resaleText_() {
+  const list = unsoldTransfers_();
+  if (!list.length) return '目前沒有還沒賣出的票 ✦';
+  return '還沒賣出的票（' + list.length + ' 筆）\n\n' + list.map(function (t) {
+    return '・' + md_(t.date) + ' ' + t.title + '\n   ' + [seatText_(t), num_(t.ticketCount) + ' 張', t.costTwd ? '成本 TWD ' + num_(t.costTwd).toLocaleString('en-US') : ''].filter(Boolean).join('｜');
+  }).join('\n') + '\n\n賣出後到網站「讓票」頁填上對方付的金額，就不會再出現在這裡。';
+}
+
+function calendarText_() {
+  let base = PROPS.getProperty('WEBAPP_URL') || '';
+  try { base = ScriptApp.getService().getUrl() || base; } catch (err) { /* 未授權時用 setupBot 存下的網址 */ }
+  if (!base) return '行事曆網址還沒設定好，請先在 Apps Script 執行一次 setupBot。';
+  const url = base + '?ics=' + encodeURIComponent(SHARED_KEY);
+  return '🗓 Apple 行事曆訂閱\n\n網址：\n' + url + '\n\niPhone：設定 → App → 行事曆 → 行事曆帳號 → 加入帳號 → 其他 → 加入訂閱的行事曆 → 貼上網址 → 下一步 → 儲存。\n\n'
+    + '之後新增的場次會自動出現（Apple 大約每小時更新一次）。網址裡有共用密碼，請不要公開分享。';
+}
+
+const QUERY_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    intent: { type: 'STRING' }, artist: { type: 'STRING' }, keyword: { type: 'STRING' },
+    year: { type: 'NUMBER' }, month: { type: 'NUMBER' },
+  },
+  required: ['intent'],
+};
+function answerQuestion_(text, me) {
+  const prompt = [
+    '今天是 ' + today_() + '。使用者在追星記帳機器人問了一句話，請判斷要查什麼，只輸出 JSON：',
+    '「' + text + '」',
+    'intent 只能是：upcoming（未來場次）、pickup（待取票）、spend（花費）、count（看過幾場）、resale（還沒賣出的轉賣票）、unknown（其他或看不懂）。',
+    'artist 是提到的表演者，keyword 是提到的其他關鍵字（例如場館、活動名稱），沒有就填空字串。',
+    'year、month 是提到的年份與月份（例如「11月」→ month 11，「今年」→ 今年的年份，「上個月」→ 換算成對應年月），沒提到填 0。',
+  ].join('\n');
+  const r = gemini_([{ text: prompt }], QUERY_SCHEMA);
+  const q = r.ok ? r.data : { intent: 'unknown' };
+  q.artist = str_(q.artist);
+  q.keyword = str_(q.keyword);
+  q.year = num_(q.year);
+  q.month = num_(q.month);
+  if (q.intent === 'upcoming') return upcomingText_(q);
+  if (q.intent === 'pickup') return pickupListMessage_();
+  if (q.intent === 'spend') return spendText_(q, me);
+  if (q.intent === 'count') return countText_(q);
+  if (q.intent === 'resale') return resaleText_();
+  return '我可以幫你查：未來場次、待取票、花費、看過幾場、還沒賣出的票，例如「11月有什麼場」「DAY6 今年看了幾場」。\n要記新的票，直接傳購票截圖給我 ✦';
+}
+
+function lineCommand_(text, me) {
+  const t = text.replace(/\s/g, '');
+  if (t === '未來場次') return upcomingText_({});
+  if (t === '待取票') return pickupListMessage_();
+  if (t === '本月花費') return spendText_({}, me);
+  if (t === '轉賣中') return resaleText_();
+  if (t === '行事曆') return calendarText_();
+  if (t === '提醒設定') return settingsText_();
+  if (t === '測試提醒') return testReminder_();
+  if (/取票提醒/.test(t)) return setReminder_('pickup', t);
+  if (/轉賣(提醒|追蹤)/.test(t)) return setReminder_('resale', t);
+  return null;
+}
+
+/* ---------- 提醒 ---------- */
+// REMIND_PICKUP：'11:50' 或 'off'；REMIND_RESALE：'4 20:00'（星期幾 1=一…7=日）或 'off'
+function reminderSettings_() {
+  return { pickup: PROPS.getProperty('REMIND_PICKUP') || '11:50', resale: PROPS.getProperty('REMIND_RESALE') || '4 20:00' };
+}
+function settingsText_() {
+  const c = reminderSettings_();
+  const rs = c.resale === 'off' ? '關閉' : '每週' + '一二三四五六日'[Number(c.resale.split(' ')[0]) - 1] + ' ' + c.resale.split(' ')[1];
+  return '⏰ 提醒設定（所有人共用）\n\n取票提醒：' + (c.pickup === 'off' ? '關閉' : '可取票當天 ' + c.pickup)
+    + '\n轉賣提醒：' + rs + '\n\n修改方式：打「取票提醒改成 9:30」「轉賣提醒改成週五 21:00」「轉賣提醒關掉」。\n實際送出時間會比設定晚 0～5 分鐘。';
+}
+function parseTime_(t) {
+  const m = t.match(/(\d{1,2})[:：點時](\d{1,2})?(半)?/) || t.match(/(\d{1,2})()()$/);
+  if (!m) return '';
+  let h = Number(m[1]);
+  const min = m[3] ? 30 : Number(m[2] || 0);
+  if (/(晚上|下午|傍晚)/.test(t) && h < 12) h += 12;
+  if (h > 23 || min > 59) return '';
+  return ('0' + h).slice(-2) + ':' + ('0' + min).slice(-2);
+}
+function setReminder_(kind, t) {
+  const key = kind === 'pickup' ? 'REMIND_PICKUP' : 'REMIND_RESALE';
+  if (/(關|停|取消|不要)/.test(t)) {
+    PROPS.setProperty(key, 'off');
+    return '已關閉' + (kind === 'pickup' ? '取票' : '轉賣') + '提醒。\n\n' + settingsText_();
+  }
+  const time = parseTime_(t.replace(/.*(提醒|追蹤)/, ''));
+  if (kind === 'pickup') {
+    if (!time) return '看不懂時間，可以這樣說：「取票提醒改成 9:30」。';
+    PROPS.setProperty(key, time);
+  } else {
+    const cur = reminderSettings_().resale;
+    const wm = t.match(/(週|星期|禮拜)([一二三四五六日天])/);
+    const day = wm ? '一二三四五六日天'.indexOf(wm[2]) % 7 + 1 : Number(cur === 'off' ? 4 : cur.split(' ')[0]);
+    const at = time || (cur === 'off' ? '20:00' : cur.split(' ')[1]);
+    if (!wm && !time) return '看不懂時間，可以這樣說：「轉賣提醒改成週五 21:00」。';
+    PROPS.setProperty(key, day + ' ' + at);
+  }
+  return '已修改 ✦\n\n' + settingsText_();
+}
+
+function pickupBubbles_(items) {
+  return items.slice(0, 12).map(function (x) {
+    const l = x.l, ev = x.ev;
+    const info = [
+      ev ? md_(ev.startDate) + (ev.startTime ? ' ' + ev.startTime : '') + (ev.venue ? '｜' + ev.venue : '') : '',
+      '取票：' + (l.ticketPickupMethod || '未填'),
+      [l.ticketPlatform, l.ticketAccount].filter(Boolean).join('｜'),
+      seatText_(l),
+    ].filter(Boolean);
+    return {
+      type: 'bubble', size: 'kilo',
+      body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+        { type: 'text', text: '今天可以取票', size: 'xs', color: '#A67B5B', weight: 'bold' },
+        { type: 'text', text: ev ? eventTitle_(ev) : l.title || '票券', weight: 'bold', wrap: true, color: '#40382E' },
+      ].concat(info.map(function (s) { return { type: 'text', text: s, size: 'sm', color: '#9C917F', wrap: true }; })) },
+      footer: { type: 'box', layout: 'vertical', contents: [
+        { type: 'button', style: 'primary', color: '#A67B5B', height: 'sm',
+          action: { type: 'postback', label: '已取票', data: 'a=picked&v=' + l.id, displayText: '已取票' } },
+      ] },
+    };
+  });
+}
+function pickupReminderMessage_(today) {
+  const items = pendingTickets_(sheetRows_('ledger'), sheetRows_('events'), today)
+    .filter(function (x) { return x.l.ticketPickupDate === today; });
+  if (!items.length) return null;
+  return { type: 'flex', altText: '今天可以取票：' + items.map(function (x) { return x.ev ? x.ev.name : x.l.title; }).join('、'),
+    contents: { type: 'carousel', contents: pickupBubbles_(items) } };
+}
+function resaleReminderMessage_() {
+  return unsoldTransfers_().length ? '🔔 每週轉賣提醒\n\n' + resaleText_() : null;
+}
+function testReminder_() {
+  const today = today_();
+  const soon = pendingTickets_(sheetRows_('ledger'), sheetRows_('events'), today).filter(function (x) { return x.l.ticketPickupDate; })
+    .sort(function (a, b) { return String(a.l.ticketPickupDate).localeCompare(String(b.l.ticketPickupDate)); }).slice(0, 3);
+  const out = ['這是提醒的範例（只傳給你）：'];
+  out.push(soon.length ? { type: 'flex', altText: '取票提醒範例', contents: { type: 'carousel', contents: pickupBubbles_(soon) } } : '（目前沒有設定取票日的票，取票提醒會長得像一張卡片，附「已取票」按鈕）');
+  out.push(resaleReminderMessage_() || '（目前沒有未賣出的轉賣票，週提醒不會傳）');
+  return out;
+}
+
+// 主動推播：傳給所有加入的人；額度不夠時不傳，快用完時附上提醒
+function linePushAll_(messages) {
+  const to = Object.keys(lineUsers_());
+  if (!to.length || !messages.length) return;
+  const head = { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') };
+  try {
+    const quota = JSON.parse(UrlFetchApp.fetch('https://api.line.me/v2/bot/message/quota', { headers: head, muteHttpExceptions: true }).getContentText());
+    const used = JSON.parse(UrlFetchApp.fetch('https://api.line.me/v2/bot/message/quota/consumption', { headers: head, muteHttpExceptions: true }).getContentText());
+    if (quota.type === 'limited') {
+      const left = num_(quota.value) - num_(used.totalUsage);
+      if (left < to.length) { Logger.log('LINE 本月推播額度不足，剩 ' + left + ' 則'); return; }
+      if (left - to.length < 20) messages = messages.concat(['⚠ 本月 LINE 主動提醒額度只剩 ' + (left - to.length) + ' 則（每月 200 則，下個月重算）。']);
+    }
+  } catch (err) {
+    Logger.log('查詢額度失敗：' + err);
+  }
+  for (let i = 0; i < to.length; i += 500) {
+    lineApi_('https://api.line.me/v2/bot/message/multicast', { to: to.slice(i, i + 500), messages: messages.slice(0, 5) });
+  }
+}
+
+// 排程每 5 分鐘執行一次（由 setupBot 建立），到了設定時間才真的傳
+function reminderTick() {
+  const now = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm u').split(' ');
+  const today = now[0], hm = now[1], weekday = now[2];
+  const c = reminderSettings_();
+  if (c.pickup !== 'off' && hm >= c.pickup && PROPS.getProperty('SENT_PICKUP') !== today) {
+    PROPS.setProperty('SENT_PICKUP', today);
+    const m = pickupReminderMessage_(today);
+    if (m) linePushAll_([m]);
+  }
+  if (c.resale !== 'off') {
+    const r = c.resale.split(' ');
+    if (weekday === r[0] && hm >= r[1] && PROPS.getProperty('SENT_RESALE') !== today) {
+      PROPS.setProperty('SENT_RESALE', today);
+      const m = resaleReminderMessage_();
+      if (m) linePushAll_([m]);
+    }
+  }
+}
+
+/* ---------- Apple 行事曆訂閱 ---------- */
+function calendarFeed_(key) {
+  if (SHARED_KEY && key !== SHARED_KEY) return ContentService.createTextOutput('bad key');
+  const esc = function (v) { return String(v || '').replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); };
+  const fold = function (line) { // 每行最多 75 字元，超過換行接續
+    const out = [];
+    while (line.length > 70) { out.push(line.slice(0, 70)); line = ' ' + line.slice(70); }
+    out.push(line);
+    return out.join('\r\n');
+  };
+  const ledger = sheetRows_('ledger');
+  const stamp = Utilities.formatDate(new Date(), 'UTC', "yyyyMMdd'T'HHmmss'Z'");
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//star-ledger//ticket//ZH', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    'X-WR-CALNAME:追星場次', 'X-WR-TIMEZONE:Asia/Taipei', 'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
+    'BEGIN:VTIMEZONE', 'TZID:Asia/Taipei', 'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0800', 'TZOFFSETTO:+0800', 'TZNAME:CST', 'END:STANDARD', 'END:VTIMEZONE'];
+  sheetRows_('events').forEach(function (e) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(e.startDate)) return;
+    const d = e.startDate.replace(/-/g, '');
+    const tickets = ledger.filter(function (l) { return l.eventId === e.id && l.category === 'ticket'; });
+    const desc = [e.seat && '座位：' + e.seat, e.eventType].concat(tickets.map(function (l) {
+      return [l.ticketPickupMethod && '取票：' + l.ticketPickupMethod, l.ticketPickupDate && '取票日 ' + l.ticketPickupDate, isPicked_(l) ? '已取票' : ''].filter(Boolean).join('｜');
+    })).filter(Boolean).join('\n');
+    lines.push('BEGIN:VEVENT', 'UID:' + e.id + '@star-ledger', 'DTSTAMP:' + stamp);
+    if (/^\d{1,2}:\d{2}$/.test(e.startTime)) {
+      const hm = e.startTime.split(':');
+      const start = d + 'T' + ('0' + hm[0]).slice(-2) + hm[1] + '00';
+      const endH = Math.min(23, Number(hm[0]) + 3);
+      lines.push('DTSTART;TZID=Asia/Taipei:' + start, 'DTEND;TZID=Asia/Taipei:' + d + 'T' + ('0' + endH).slice(-2) + hm[1] + '00');
+    } else {
+      const next = new Date(e.startDate + 'T00:00:00Z');
+      next.setUTCDate(next.getUTCDate() + 1);
+      lines.push('DTSTART;VALUE=DATE:' + d, 'DTEND;VALUE=DATE:' + next.toISOString().slice(0, 10).replace(/-/g, ''));
+    }
+    lines.push(fold('SUMMARY:' + esc(eventTitle_(e))), fold('LOCATION:' + esc([e.city, e.venue].filter(Boolean).join(' '))));
+    if (desc) lines.push(fold('DESCRIPTION:' + esc(desc)));
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  return ContentService.createTextOutput(lines.join('\r\n')).setMimeType(ContentService.MimeType.ICAL);
+}
+
+/* ---------- 一次性設定：在編輯器選 setupBot →「執行」 ---------- */
+const RICHMENU_IMAGE = 'https://snowmanyo.github.io/star-ledger/line-richmenu.png';
+function setupBot() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'reminderTick') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('reminderTick').timeBased().everyMinutes(5).create();
+  PROPS.setProperty('WEBAPP_URL', ScriptApp.getService().getUrl() || '');
+  Logger.log('已建立提醒排程（每 5 分鐘檢查一次）');
+  Logger.log(setupRichMenu_());
+}
+function setupRichMenu_() {
+  const head = { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') };
+  const old = PROPS.getProperty('RICHMENU_ID');
+  if (old) UrlFetchApp.fetch('https://api.line.me/v2/bot/richmenu/' + old, { method: 'delete', headers: head, muteHttpExceptions: true });
+  const labels = ['未來場次', '待取票', '本月花費', '轉賣中', '行事曆', '說明'];
+  const menu = {
+    size: { width: 2500, height: 843 }, selected: true, name: '追星記票', chatBarText: '選單',
+    areas: labels.map(function (label, i) {
+      return { bounds: { x: Math.round((i % 3) * 2500 / 3), y: i < 3 ? 0 : 421, width: 833, height: i < 3 ? 421 : 422 }, action: { type: 'message', text: label } };
+    }),
+  };
+  const res = lineApi_('https://api.line.me/v2/bot/richmenu', menu);
+  if (res.getResponseCode() !== 200) return '建立選單失敗：' + res.getContentText();
+  const id = JSON.parse(res.getContentText()).richMenuId;
+  const img = UrlFetchApp.fetch(RICHMENU_IMAGE).getBlob();
+  const up = UrlFetchApp.fetch('https://api-data.line.me/v2/bot/richmenu/' + id + '/content', {
+    method: 'post', contentType: 'image/png', payload: img.getBytes(), headers: head, muteHttpExceptions: true,
+  });
+  if (up.getResponseCode() !== 200) return '上傳選單圖片失敗：' + up.getContentText();
+  UrlFetchApp.fetch('https://api.line.me/v2/bot/user/all/richmenu/' + id, { method: 'post', headers: head, muteHttpExceptions: true });
+  PROPS.setProperty('RICHMENU_ID', id);
+  return '已建立聊天室下方選單 ✦';
 }

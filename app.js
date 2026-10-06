@@ -2327,6 +2327,7 @@ async function startScan(files) {
     });
     scanTestQuota = false;
     s.model = res.model || '';
+    s.duplicate = res.duplicate || null;
     await applyScanResult(s, res.data || {});
     s.status = 'done';
   } catch (err) {
@@ -2504,9 +2505,11 @@ function renderScanBody() {
         ? `<div class="scan-status ok">✦ 已讀取，請核對下方資訊，黃色欄位特別留意</div>`
         : `<div class="scan-status">手動填寫</div>`;
 
+  const dupHtml = s.duplicate ? `<div class="scan-status err">⚠ 這筆訂單好像已經記過了：${esc(s.duplicate.title)}${s.duplicate.date ? `（${esc(s.duplicate.date)}）` : ''}，確定要再記一次嗎？</div>` : '';
   body.innerHTML = `
     ${s.images.length ? `<div class="scan-thumbs">${s.images.map(i => `<img src="${i.url}" alt="">`).join('')}</div>` : ''}
     ${statusHtml}
+    ${dupHtml}
 
     <div class="scan-q">
       <div class="scan-q-title">這是自己要去的，還是要轉賣？</div>

@@ -126,7 +126,9 @@ const SCAN_PROMPT = [
   '規則：',
   '- 看不到或無法判斷的欄位填空字串或 0，不要猜。',
   '- date 用 YYYY-MM-DD；截圖沒寫年份時，用今天（{TODAY}）之後最近的那一天推算。time 用 24 小時制 HH:MM。',
-  '- eventName 用截圖上的活動名稱原文；artist 是表演者。city 是城市（例：台北、首爾），venue 是場館。',
+  '- artist 是表演者；eventName 是演出名稱本身：去掉開頭的表演者名稱和結尾的城市（例如 in TAIPEI、台北站），其餘照截圖原文。',
+  '  例：「ITZY 3RD WORLD TOUR <TUNNEL VISION> in TAIPEI」→ artist：ITZY，eventName：3RD WORLD TOUR <TUNNEL VISION>。',
+  '- city 是城市（例：台北、首爾），venue 是場館。',
   '- currency 用 TWD、KRW、JPY、USD 其中之一。unitFace 是單張票面價，unitFee 是單張手續費（只有總手續費就除以張數），totalPaid 是這筆訂單實際付款總額。數字不要千分位逗號。',
   '- seats 每張票一筆：area 區域、row 排、seat 座號（只填數字或代號，不要加「排」「號」）。ticketCount 是張數。',
   '- platform 是售票平台，符合以下其一就用這個寫法：拓元、KKTIX、ibon、年代、寬宏、遠大、NOL、Melon、YES24；Interpark 也寫 NOL；都不是就寫看到的名稱。',
@@ -179,10 +181,22 @@ function readTicketImages_(images) {
   });
   const r = gemini_(parts, SCAN_SCHEMA);
   if (r.ok) {
+    r.data.eventName = cleanEventName_(r.data.eventName, r.data.artist);
     applyAliases_(r.data);
     r.duplicate = findOrder_(r.data.orderNumber);
   }
   return r;
+}
+
+// 演出名稱去掉開頭的表演者、結尾的城市（AI 沒拆乾淨時的保險）
+function cleanEventName_(name, artist) {
+  const raw = String(name || '').trim();
+  let n = raw;
+  const a = String(artist || '').trim();
+  if (a && n.toLowerCase().indexOf(a.toLowerCase()) === 0 && n.length > a.length + 1) n = n.slice(a.length).replace(/^[\s\-–—:：|｜]+/, '');
+  n = n.replace(/\s+in\s+[A-Za-z][A-Za-z .]{1,24}$/i, '')
+    .replace(/\s*[-–—]?\s*(台北|臺北|新北|桃園|台中|臺中|台南|臺南|高雄|首爾|釜山|東京|大阪|橫濱|名古屋|福岡|香港|澳門|曼谷|新加坡)\s*站$/, '').trim();
+  return n || raw;
 }
 
 const ALIAS_FIELDS = { venue: '場館', city: '城市', artist: '表演者', eventName: '活動名稱' };
@@ -463,6 +477,8 @@ function setName_(token, uid, users, name) {
 }
 
 function onLineImage_(ev, uid, me) {
+  clearEditSession_(uid); // 傳新截圖＝開始新的事，結束修改中／產生文章中的狀態
+  clearTradeSession_(uid);
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   let s;
@@ -603,7 +619,7 @@ const seatText_ = function (l) {
 };
 function summaryText_(d) {
   return [
-    d.eventName || '（沒讀到活動名稱）',
+    [d.artist, d.eventName || '（沒讀到活動名稱）'].filter(Boolean).join('｜'),
     [d.date, d.time].filter(Boolean).join(' ') + (d.venue ? '｜' + [d.city, d.venue].filter(Boolean).join(' ') : ''),
     [seatText_({ ticketArea: d.area, ticketRow: d.row, ticketSeat: d.seat }), d.ticketCount + ' 張', money_(d.currency, d.totalPaid)].filter(Boolean).join('｜'),
   ].filter(Boolean).join('\n');
@@ -1039,7 +1055,7 @@ function confirmDraft_(token, uid, me, s) {
       s.step = 'dupe';
       saveLineSession_(uid, s);
       return lineReply_(token, ask_('總帳裡已經有同一天的場次，要加到既有場次，還是另建新的？', 'dupe',
-        dupes.slice(0, 3).map(function (e) { return [e.id, '加到 ' + e.name]; }).concat([['new', '另建新場次']])));
+        dupes.slice(0, 3).map(function (e) { return [e.id, '加到 ' + eventTitle_(e)]; }).concat([['new', '另建新場次']])));
     }
   }
   const result = commitLine_(d, me, s.eventChoice && s.eventChoice !== 'new' ? s.eventChoice : '');
@@ -1124,7 +1140,7 @@ function commitLine_(d, me, existingId) {
       writeRows_('transfers', [{
         id: newId_(), date: d.date || today_(), eventId: linked ? linked.id : '', kind: '轉賣', person: '', title: title,
         ticketCount: count, ticketArea: d.area, ticketRow: d.row, ticketSeat: d.seat,
-        costTwd: amountTwd || '', amountTwd: '', feeTwd: '', settled: false, notes: info.concat(notes).join('｜'), createdAt: today_(),
+        costTwd: amountTwd || '', amountTwd: amountTwd || '', feeTwd: '', settled: false, notes: info.concat(notes).join('｜'), createdAt: today_(),
         artist: d.artist, eventName: d.eventName, startTime: d.time, venue: d.venue, city: d.city,
         faceTwd: foreign ? '' : num_(d.unitFace) || '', platform: d.platform, account: d.account, orderNumber: d.orderNumber,
         pickupDate: d.pickupDate, pickupMethod: d.pickupMethod, pickedUp: false, ticketFeeTwd: foreign ? '' : num_(d.unitFee) || '',
@@ -1149,7 +1165,7 @@ function commitLine_(d, me, existingId) {
       events.push(ev);
     }
     const ledger = {
-      id: newId_(), type: 'expense', category: 'ticket', date: d.date || today_(), title: '票券 - ' + ev.name, eventId: ev.id,
+      id: newId_(), type: 'expense', category: 'ticket', date: d.date || today_(), title: '票券 - ' + eventTitle_(ev), eventId: ev.id,
       amountTwd: amountTwd || '', currency: foreign ? d.currency : '', originalAmount: foreign ? num_(d.totalPaid) || '' : '',
       exchangeRate: foreign ? num_(d.exchangeRate) || '' : '', payer: d.payer, paymentMethod: d.payMethod, paymentDetail: d.payDetail,
       counterparty: '', expectedReceivableTwd: '', receivedTwd: '', notes: notes.join('｜'),
@@ -1418,7 +1434,7 @@ function transferItem_(t, ev) {
     pickupMethod: t.pickupMethod || noteField_(t.notes, /取票：([^｜]+)/),
     platform: t.platform || noteField_(t.notes, /平台：([^｜]+)/), account: t.account || noteField_(t.notes, /帳號：([^｜]+)/),
     picked: String(t.pickedUp) === 'true', sold: String(t.settled) === 'true' || num_(t.amountTwd) > 0,
-    stage: transferStage_(t), buyer: t.person, contact: t.buyerContact, price: num_(t.amountTwd), received: transferReceived_(t),
+    stage: transferStage_(t), buyer: t.person, contact: t.buyerContact, price: priceOf_(t), received: transferReceived_(t),
     payer: noteField_(t.notes, /付款人：([^｜]+)/),
   };
 }
@@ -1522,12 +1538,14 @@ const STAGE_ = {
   deliver: { label: '🔵 待給票', color: '#5F8CA3' }, done: { label: '✅ 完成', color: C_OK }, refund: { label: '退票', color: C_MUTED },
 };
 // 舊資料沒有「已收」「已給票」：勾過已收款的當作完成
+// 成交價沒填時，預設就是當初實付的金額（票面＋手續費＋福利）
+const priceOf_ = function (t) { return num_(t.amountTwd) || num_(t.costTwd); };
 const transferReceived_ = function (t) { return str_(t.receivedTwd) === '' ? (String(t.settled) === 'true' ? num_(t.amountTwd) : 0) : num_(t.receivedTwd); };
 const transferDelivered_ = function (t) { return String(t.delivered) === 'true' || (str_(t.receivedTwd) === '' && String(t.settled) === 'true'); };
 function transferStage_(t) {
   if (t.kind === '退票') return 'refund';
   if (transferDelivered_(t)) return 'done';
-  const got = transferReceived_(t), price = num_(t.amountTwd);
+  const got = transferReceived_(t), price = priceOf_(t);
   if (!str_(t.person) && !got) return 'sale';
   if (got <= 0) return 'talk';
   if (price && got < price) return 'deposit';
@@ -2392,7 +2410,7 @@ function transferCard_(t) {
       ftext_([dateW_(it.date) + (it.time ? ' ' + it.time : ''), [it.seat, '×' + it.count + ' 張'].filter(Boolean).join(' ')].join('\n'), 'sm', C_MUTED),
       { type: 'separator', margin: 'md' },
       row('買家', it.buyer), row('聯絡方式', it.contact),
-      row('成交價', it.price ? it.price.toLocaleString('en-US') : ''), row('已收', it.received ? it.received.toLocaleString('en-US') : ''),
+      row('成交價', it.price ? it.price.toLocaleString('en-US') + (num_(t.amountTwd) ? '' : '（預設＝實付）') : ''), row('已收', it.received ? it.received.toLocaleString('en-US') : ''),
       row('已給票', transferDelivered_(t) ? '是' : '還沒'),
       ftext_('直接打字更新，例如「買家小美 LINE abc123 成交4580 收訂金1000」「又收了2000」', 'xxs', C_MUTED, { margin: 'md' }),
     ] }, footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
@@ -2402,7 +2420,7 @@ function transferCard_(t) {
   };
 }
 function saveTransferRow_(t) {
-  t.settled = num_(t.amountTwd) > 0 && num_(t.receivedTwd) >= num_(t.amountTwd); // 相容舊欄位：收齊就算已收款
+  t.settled = priceOf_(t) > 0 && num_(t.receivedTwd) >= priceOf_(t); // 相容舊欄位：收齊就算已收款
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try { setup_(); writeRows_('transfers', [t]); } finally { lock.releaseLock(); }
@@ -2427,8 +2445,8 @@ function quickTransfer_(token, uid, v) {
   if (!t) return lineReply_(token, '找不到這筆，可能已經被刪除了。');
   saveEditSession_(uid, { kind: 'transfer', id: t.id });
   if (parts[1] === 'paid') {
-    if (!num_(t.amountTwd)) return lineReply_(token, '還沒有成交價，先打字告訴我，例如「成交4580」。');
-    t.receivedTwd = num_(t.amountTwd);
+    if (!priceOf_(t)) return lineReply_(token, '還沒有成交價，先打字告訴我，例如「成交4580」。');
+    t.receivedTwd = priceOf_(t);
   } else if (parts[1] === 'given') {
     t.delivered = true;
     t.receivedTwd = transferReceived_(t);
@@ -2450,7 +2468,7 @@ function editTransferText_(token, uid, sess, text) {
   const t = findTransfer_(sess.id);
   if (!t) { clearEditSession_(uid); return lineReply_(token, '找不到這筆，可能已經被刪除了。'); }
   lineLoading_(uid);
-  const view = { person: t.person, buyerContact: t.buyerContact, amountTwd: num_(t.amountTwd), receivedTwd: transferReceived_(t), delivered: transferDelivered_(t), notes: t.notes };
+  const view = { person: t.person, buyerContact: t.buyerContact, amountTwd: priceOf_(t), receivedTwd: transferReceived_(t), delivered: transferDelivered_(t), notes: t.notes };
   const r = gemini_([{ text: [
     '以下是一筆轉賣票的資料（JSON）：', JSON.stringify(view), '使用者說：「' + text + '」',
     '請輸出 understood: true，並只包含要修改的欄位。person 是買家名字，buyerContact 是聯絡方式（LINE ID、站內信帳號等），amountTwd 是成交價，',

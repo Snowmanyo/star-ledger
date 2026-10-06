@@ -1305,12 +1305,14 @@ const STAGES = {
   deliver: { label: '待給票', cls: 'accent' }, done: { label: '完成', cls: 'ok' }, refund: { label: '退票', cls: '' },
 };
 // 舊資料沒有「已收」「已給票」：勾過已收款的當作已完成
+// 成交價沒填時，預設就是當初實付的金額（票面＋手續費＋福利）
+const transferPrice = t => num(t.amountTwd) || num(t.costTwd);
 const transferReceived = t => t.receivedTwd === '' || t.receivedTwd == null ? (t.settled ? num(t.amountTwd) : 0) : num(t.receivedTwd);
 const transferDelivered = t => !!t.delivered || ((t.receivedTwd === '' || t.receivedTwd == null) && !!t.settled);
 function transferStage(t) {
   if (t.kind === '退票') return 'refund';
   if (transferDelivered(t)) return 'done';
-  const got = transferReceived(t), price = num(t.amountTwd);
+  const got = transferReceived(t), price = transferPrice(t);
   if (!t.person && !got) return 'sale'; // 還沒有買家（就算先填了售價）
   if (got <= 0) return 'talk';
   if (price && got < price) return 'deposit';
@@ -1324,7 +1326,7 @@ function transfersHtml() {
     (order[transferStage(a)] - order[transferStage(b)]) || String(a.date).localeCompare(String(b.date)));
   if (!list.length) return emptyHtml('還沒有讓票／換票紀錄，點右下角＋新增');
   const active = list.filter(t => !['done', 'refund'].includes(transferStage(t)));
-  const owed = active.reduce((s, t) => s + Math.max(0, num(t.amountTwd) - transferReceived(t)), 0);
+  const owed = active.filter(t => transferStage(t) !== 'sale').reduce((s, t) => s + Math.max(0, transferPrice(t) - transferReceived(t)), 0);
   let html = `<div class="stat-strip" style="grid-template-columns:repeat(3,1fr)">
     <div class="stat"><div class="n">${active.length}</div><div class="l">進行中</div></div>
     <div class="stat"><div class="n">${active.filter(t => transferStage(t) === 'sale').length}</div><div class="l">待售</div></div>
@@ -1334,7 +1336,7 @@ function transfersHtml() {
   html += list.map(t => {
     const ev = DB.events.find(e => e.id === t.eventId);
     const seat = seatText({ ticketArea: t.ticketArea, ticketRow: t.ticketRow, ticketSeat: t.ticketSeat });
-    const st = transferStage(t), got = transferReceived(t), price = num(t.amountTwd);
+    const st = transferStage(t), got = transferReceived(t), price = transferPrice(t);
     return `<div class="card tappable" data-transfer="${esc(t.id)}">
       <div class="row-head">
         <div class="row-title">${stageBadge(t)} ${esc(t.title || (ev ? eventTitle(ev) : (t.notes || '未指定活動')))}</div>
@@ -2327,7 +2329,7 @@ function openTransferForm(existing) {
     ${fieldHtml('聯絡方式', `<input id="t-buyerContact" placeholder="LINE ID、站內信帳號…" value="${esc(t.buyerContact || '')}">`)}
   </div>
   <div class="field-row">
-    ${fieldHtml('成交價', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
+    ${fieldHtml('成交價（預設＝實付）', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd || t.costTwd || '')}">`)}
     ${fieldHtml('已收', `<input id="t-receivedTwd" type="number" inputmode="numeric" value="${esc(transferReceived(t) || '')}">`)}
     ${fieldHtml('退票手續費', `<input id="t-feeTwd" type="number" inputmode="numeric" value="${esc(t.feeTwd)}">`)}
   </div>
@@ -2347,7 +2349,13 @@ function openTransferForm(existing) {
     if (ev.startDate) $('#t-date').value = ev.startDate;
     if (!$('#t-title').value.trim()) $('#t-title').value = ev.name;
   };
-  $('#t-costTwd').addEventListener('input', refreshTHint);
+  let lastCost = $('#t-costTwd').value;
+  $('#t-costTwd').addEventListener('input', () => {
+    const amt = $('#t-amountTwd');
+    if (amt.value === '' || amt.value === lastCost) amt.value = $('#t-costTwd').value; // 成交價還是預設時，跟著實付一起變
+    lastCost = $('#t-costTwd').value;
+    refreshTHint();
+  });
   ['t-amountTwd', 't-feeTwd', 't-receivedTwd', 't-person', 't-delivered', 't-kind'].forEach(id => $('#' + id).addEventListener('input', refreshTHint));
   $('#t-delivered').addEventListener('change', refreshTHint);
   $('#t-paid').onclick = () => { $('#t-receivedTwd').value = $('#t-amountTwd').value; refreshTHint(); };
@@ -2859,7 +2867,7 @@ async function commitScan(existingEvent) {
       if (!ev.eventType && f.eventType) ev.eventType = f.eventType;
     }
     const l = {
-      id: uid(), type: 'expense', category: 'ticket', date: f.date || today(), title: '票券 - ' + ev.name, eventId: ev.id,
+      id: uid(), type: 'expense', category: 'ticket', date: f.date || today(), title: '票券 - ' + eventTitle(ev), eventId: ev.id,
       amountTwd: amountTwd || '', currency: foreign ? f.currency : '', originalAmount: foreign ? num(f.totalPaid) || '' : '',
       exchangeRate: foreign ? num(f.exchangeRate) || '' : '', payer: a.payer, paymentMethod: a.payMethod, paymentDetail: a.payDetail,
       counterparty: '', expectedReceivableTwd: '', receivedTwd: '', settled: '', notes: notes.join('｜'),

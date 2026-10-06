@@ -81,6 +81,22 @@ function ownShare(l) {
   return Math.max(0, num(l.amountTwd) - num(l.expectedReceivableTwd));
 }
 const ledgerOut = rows => rows.map(r => Object.assign({}, r, { splits: JSON.stringify(splitList(r)) }));
+// 跟我有關的票：我要去（分帳名單有我）或我付的錢；沒記誰要去的舊資料算大家共同的
+function ticketIsMine(l) {
+  if (!CFG.myName) return true;
+  const sp = splitList(l).filter(s => s.name);
+  return !sp.length || sp.some(s => s.name === CFG.myName) || l.payer === CFG.myName;
+}
+const eventTickets = e => DB.ledger.filter(l => l.eventId === e.id && l.category === 'ticket');
+function eventIsMine(e) {
+  const t = eventTickets(e);
+  return !t.length || t.some(ticketIsMine);
+}
+// 活動票價依這台裝置的「我的名字」即時算我的份（同一場可能有好幾個人的訂單）
+function myEventPrice(e) {
+  const t = eventTickets(e);
+  return t.length ? t.reduce((s, l) => s + ownShare(l), 0) : num(e.ticketPriceTwd);
+}
 function eventTitle(e) {
   return (e.eventType === '拼盤' || !e.artist || String(e.name).includes(e.artist))
     ? e.name : e.artist + ' - ' + e.name;
@@ -505,6 +521,7 @@ const state = { tab: 'home', seg: 'list', search: '', evSearch: '', cat: '', set
 const savedUi = JSON.parse(localStorage.getItem('sl-ui') || '{}');
 if (savedUi.seg) state.seg = savedUi.seg;
 if (savedUi.evSeg) state.evSeg = savedUi.evSeg;
+state.evMine = savedUi.evMine !== false;
 
 function setTab(tab) {
   state.tab = tab;
@@ -515,7 +532,7 @@ function render(scrollTop) {
   $('#page-title').textContent = TAB_TITLE[state.tab];
   $$('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
   $('#fab').classList.toggle('hide', state.tab === 'home' || state.tab === 'settings' || (state.tab === 'orders' && state.seg === 'sales'));
-  localStorage.setItem('sl-ui', JSON.stringify({ tab: state.tab, seg: state.seg, evSeg: state.evSeg }));
+  localStorage.setItem('sl-ui', JSON.stringify({ tab: state.tab, seg: state.seg, evSeg: state.evSeg, evMine: state.evMine }));
   const view = $('#view');
   const chipsPos = $$('.chips', view).map(c => c.scrollLeft);
   const y = window.scrollY;
@@ -554,12 +571,13 @@ function renderHome(view) {
   const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
   const now = new Date();
   const dateLine = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日 · 星期${weekdays[now.getDay()]}`;
-  const upcoming = DB.events.filter(e => String(e.startDate || '') >= t)
+  const upcoming = DB.events.filter(e => String(e.startDate || '') >= t && eventIsMine(e))
     .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate))).slice(0, 5);
   const pendingOrders = DB.orders.filter(o => (o.items || []).some(it => !it.arrived)).length;
   const unsettled = DB.events.filter(e => !e.settled).length;
   const daysTo = d => Math.ceil((new Date(d) - now) / 86400000);
   const pickups = DB.ledger.filter(l => {
+    if (!ticketIsMine(l)) return false;
     if (l.category !== 'ticket' || toBool(l.ticketPickedUp)) return false;
     if (!l.ticketPickupDate || String(l.ticketPickupDate) > t) return false;
     const ev = DB.events.find(e => e.id === l.eventId);
@@ -934,6 +952,7 @@ function renderEvents(view) {
     $$('[data-year]', view).forEach(b => b.onclick = () => { state.statYear = b.dataset.year; render(); });
     return;
   }
+  $$('[data-evmine]', view).forEach(b => b.onclick = () => { state.evMine = !!b.dataset.evmine; render(); });
   const si = $('#ev-search');
   si.oninput = () => { state.evSearch = si.value; render(); const el = $('#ev-search'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); };
   $$('[data-event]', view).forEach(el => el.onclick = () => {
@@ -953,6 +972,7 @@ function renderEvents(view) {
 function eventListHtml() {
   const q = state.evSearch.trim().toLowerCase();
   let list = DB.events.slice();
+  if (state.evMine && CFG.myName) list = list.filter(eventIsMine);
   if (q) list = list.filter(e => [e.name, e.artist, e.venue, e.city, e.liveTour, e.seriesEvent, e.seat, e.guest]
     .some(v => String(v || '').toLowerCase().includes(q)));
   const numbered = DB.events.filter(e => num(e.eventNumber) && e.startDate);
@@ -970,7 +990,11 @@ function eventListHtml() {
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m16.5 16.5 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     <input id="ev-search" placeholder="搜尋活動、歌手、場地…" value="${esc(state.evSearch)}">
   </div>
-  <div class="section-note">${list.length} 場活動</div>`;
+  ${CFG.myName ? `<div class="chips">
+    <button class="chip ${state.evMine ? 'on' : ''}" data-evmine="1">只看我的</button>
+    <button class="chip ${state.evMine ? '' : 'on'}" data-evmine="">全部</button>
+  </div>` : ''}
+  <div class="section-note">${list.length} 場活動${state.evMine && CFG.myName ? `（跟 ${esc(CFG.myName)} 有關的，含以前的共同場次）` : ''}</div>`;
   if (!list.length) html += emptyHtml('沒有符合的活動');
   const evTitle = eventTitle;
   html += list.map(e => `<div class="card tappable" data-event="${esc(e.id)}">
@@ -979,7 +1003,7 @@ function eventListHtml() {
       <div style="flex:1;min-width:0">
         <div class="row-head">
           <div class="row-title"><span style="color:var(--accent);font-family:var(--serif)">#${esc(e.eventNumber || '–')}</span> ${esc(evTitle(e))}</div>
-          <div class="amount">${fmtInt(e.ticketPriceTwd)}</div>
+          <div class="amount">${fmtInt(myEventPrice(e))}</div>
         </div>
         <div class="row-meta">
           <span>${esc(e.startDate || '—')}${e.startTime ? ' ' + esc(e.startTime) : ''}</span>
@@ -1006,7 +1030,7 @@ function topCount(list, keyFn) {
       if (!k) return;
       m[k] = m[k] || { n: 0, spend: 0 };
       m[k].n++;
-      m[k].spend += num(e.ticketPriceTwd);
+      m[k].spend += e._price;
     });
   });
   return Object.entries(m).map(([label, v]) => ({ label, n: v.n, spend: v.spend }))
@@ -1034,11 +1058,12 @@ function eventStatsHtml() {
   const years = [...new Set(DB.events.map(e => String(e.startDate || '').slice(0, 4)).filter(y => /^\d{4}$/.test(y)))].sort().reverse();
   const y = state.statYear;
   const evs = DB.events.filter(e => !y || String(e.startDate || '').startsWith(y));
-  const priced = evs.filter(e => num(e.ticketPriceTwd) > 0);
-  const spend = priced.reduce((s, e) => s + num(e.ticketPriceTwd), 0);
+  evs.forEach(e => { e._price = myEventPrice(e); });
+  const priced = evs.filter(e => e._price > 0);
+  const spend = priced.reduce((s, e) => s + e._price, 0);
   const artists = new Set(evs.map(e => e.artist).filter(Boolean));
   const cities = new Set(evs.map(e => e.city).filter(Boolean));
-  const most = priced.slice().sort((a, b) => num(b.ticketPriceTwd) - num(a.ticketPriceTwd))[0];
+  const most = priced.slice().sort((a, b) => b._price - a._price)[0];
   const splitGuests = e => String(e.guest || '').split(/[、,，/／]/).map(s => s.trim()).filter(s => s && s !== '無' && s !== '-');
 
   let html = `<div class="chips">
@@ -1053,7 +1078,7 @@ function eventStatsHtml() {
   <div class="stat-strip">
     <div class="stat"><div class="n">${cities.size}</div><div class="l">跑過城市</div></div>
     <div class="stat"><div class="n">${priced.length ? fmtInt(spend / priced.length) : '—'}</div><div class="l">平均票價</div></div>
-    <div class="stat"><div class="n">${most ? fmtInt(most.ticketPriceTwd) : '—'}</div><div class="l">最貴場次</div></div>
+    <div class="stat"><div class="n">${most ? fmtInt(most._price) : '—'}</div><div class="l">最貴場次</div></div>
   </div>
   ${most ? `<div class="section-note" style="text-align:center">最貴的場次：${esc(most.name)}（${esc(most.startDate)}）</div>` : ''}`;
 
@@ -1875,14 +1900,14 @@ function openLedgerForm(existing, preset, backEventId) {
     ${fieldHtml('匯率', `<input id="l-exchangeRate" type="number" step="any" inputmode="decimal" value="${esc(l.exchangeRate)}">`)}
   </div>
 
-  <div class="form-section">在場的人怎麼分
+  <div class="form-section">誰要去、怎麼分
     <span style="display:flex;gap:8px">
       <button class="btn line small" id="even-split">平分</button>
       <button class="btn line small" id="add-split">＋ 加一個人</button>
     </span>
   </div>
   <div class="hint">${CFG.myName
-    ? `這本帳的主人是「${esc(CFG.myName)}」。加人時金額自動平分（總金額÷人數），可以再手動改。`
+    ? `票券：每個人填要去的張數（同一場分開買就分成兩筆流水）。這台裝置的「我的名字」是「${esc(CFG.myName)}」。加人時金額自動平分，可以再手動改。`
     : '⚠ 還沒設定「我的名字」，請到設定頁填寫，系統才知道哪一份是你的。'}</div>
   <datalist id="dl-cp">${datalistOptions(peopleList())}</datalist>
   <div id="splits-wrap">${l.splits.map(splitRow).join('')}</div>
@@ -2212,6 +2237,15 @@ const TICKET_PLATFORMS = ['拓元', 'KKTIX', 'ibon', '年代', '寬宏', '遠大
 const PLATFORM_ALIAS = { interpark: 'NOL', 'nol ticket': 'NOL', 'nol interpark': 'NOL', tixcraft: '拓元', kham: '寬宏', 'era ticket': '年代' };
 const SCAN_PAY = [['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付'], ['cash', '現金']];
 const PICKUP_METHODS = ['電子票', '超商取票', '現場取票', '宅配'];
+// 誰要去 → 分帳名單：人數等於張數就每人 1 張；只有一個人就全給他；其他情況每人 1 張、剩下的給第一個人
+function attendSplits(names, count, amountTwd) {
+  if (!names.length || !amountTwd) return [];
+  const per = amountTwd / count;
+  const counts = names.map(() => 1);
+  if (names.length === 1) counts[0] = count;
+  else if (names.length < count) counts[0] += count - names.length;
+  return names.map((name, i) => ({ name, count: counts[i], amountTwd: Math.round(per * counts[i]), settled: false }));
+}
 const EVENT_KINDS = ['專場', '拼盤'];
 // 開演前 N 天 → 取票日
 function pickupFromDays(date, days) {
@@ -2230,7 +2264,7 @@ const scanMem = () => Object.assign({ accounts: {}, details: [] }, JSON.parse(lo
 function newScan() {
   return {
     images: [], status: 'reading', error: '', model: '', unsure: [], twdTouched: false, otherPlatform: false, otherPayer: false,
-    answers: { purpose: '', platform: '', account: '', payMethod: '', payDetail: '', payer: '' },
+    answers: { purpose: '', platform: '', account: '', payMethod: '', payDetail: '', payer: '', attend: CFG.myName ? [CFG.myName] : [] },
     f: {
       eventName: '', artist: '', date: '', time: '', city: '', venue: '', ticketType: '', area: '', row: '', seat: '',
       ticketCount: 1, currency: 'TWD', unitFace: '', unitBenefit: '', unitFee: '', totalPaid: '', amountTwd: '', exchangeRate: '',
@@ -2515,6 +2549,8 @@ function renderScanBody() {
     <div class="scan-q">
       <div class="scan-q-title">這是自己要去的，還是要轉賣？</div>
       <div class="scan-chips">${scanChip('purpose', 'self', '自己去', a.purpose === 'self')}${scanChip('purpose', 'resale', '要轉賣', a.purpose === 'resale')}</div>
+      ${a.purpose === 'self' ? `<div class="scan-q-sub">誰要去？（可以選多個人）</div>
+      <div class="scan-chips">${[...new Set(peopleList().concat(a.attend || []))].map(n => scanChip('attend', n, n, (a.attend || []).includes(n))).join('')}</div>` : ''}
     </div>
     <div class="scan-q">
       <div class="scan-q-title">在哪個平台、誰的帳號買的？</div>
@@ -2576,6 +2612,8 @@ function renderScanBody() {
     } else if (g === 'payer') {
       s.otherPayer = v === '__other';
       a.payer = s.otherPayer ? (payers.includes(a.payer) ? '' : a.payer) : v;
+    } else if (g === 'attend') {
+      a.attend = (a.attend || []).includes(v) ? a.attend.filter(x => x !== v) : (a.attend || []).concat([v]);
     } else if (g.startsWith('f:')) {
       const k = g.slice(2);
       f[k] = f[k] === v ? '' : v; // 再點一次取消選擇
@@ -2666,7 +2704,7 @@ async function commitScan(existingEvent) {
       ticketType: clean(f.ticketType), ticketArea: clean(f.area), ticketRow: clean(f.row), ticketSeat: clean(f.seat),
       attendee: '', ticketStatus: '', ticketFaceTwd: foreign ? '' : num(f.unitFace) || '',
       ticketFeeTwd: foreign ? '' : num(f.unitFee) || '', ticketBenefitTwd: foreign ? '' : num(f.unitBenefit) || '', ticketPickupMethod: f.pickupMethod, ticketPlatform: a.platform, ticketAccount: a.account, ticketCount: count,
-      splits: CFG.myName && amountTwd ? [{ name: CFG.myName, count: 1, amountTwd: Math.round(amountTwd / count), settled: false }] : [],
+      splits: attendSplits(a.attend && a.attend.length ? a.attend : (CFG.myName ? [CFG.myName] : []), count, amountTwd),
       ticketPickupDate: f.pickupDate, ticketPickedUp: false, ticketOrderNumber: clean(f.orderNumber), createdAt: today(),
     };
     const okEvent = await saveEvent(ev);

@@ -322,7 +322,7 @@ const LINE_PLATFORMS = ['拓元', 'KKTIX', 'ibon', '年代', '寬宏', '遠大',
 const LINE_PLATFORM_ALIAS = { interpark: 'NOL', 'nol ticket': 'NOL', 'nol interpark': 'NOL', tixcraft: '拓元', kham: '寬宏', 'era ticket': '年代' };
 const PAY_LABEL_ = { credit_card: '信用卡', bank_transfer: '轉帳', mobile_payment: '行動支付', cash: '現金' };
 const PICKUP_METHODS_ = ['電子票', '超商取票', '現場取票', '宅配'];
-const LINE_STEPS = ['purpose', 'eventType', 'platform', 'account', 'payMethod', 'payDetail', 'payer', 'pickupMethod', 'pickup'];
+const LINE_STEPS = ['purpose', 'attend', 'eventType', 'platform', 'account', 'payMethod', 'payDetail', 'payer', 'pickupMethod', 'pickup'];
 const OPTIONAL_STEPS = ['account', 'payDetail', 'pickup']; // 可以跳過的題目
 const AI_FIELDS = ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'eventType', 'ticketType', 'area', 'row', 'seat',
   'ticketCount', 'currency', 'unitFace', 'unitBenefit', 'unitFee', 'totalPaid', 'orderNumber', 'pickupDate', 'pickupMethod',
@@ -513,6 +513,7 @@ function startDraft_(token, uid, s) {
     return lineReply_(token, '看不出這是購票截圖耶，換一張試試看 🙏');
   }
   s.d = draftFrom_(r.data);
+  s.meName = (lineUsers_()[uid] || {}).name || '';
   s.asked = {};
   s.edited = [];
   if (r.duplicate) {
@@ -606,6 +607,7 @@ function summaryText_(d) {
 
 function stepDone_(s, step) {
   if (OPTIONAL_STEPS.indexOf(step) >= 0 && s.asked[step]) return true;
+  if (step === 'attend') return s.d.purpose === 'resale' || (s.d.attend || []).length > 0;
   if (step === 'pickup') return !!s.d.pickupDate;
   return !!s.d[step];
 }
@@ -625,6 +627,14 @@ function question_(step, d) {
   const skip = [['__skip', '跳過']];
   const pairs = function (list) { return list.map(function (x) { return [x, x]; }); };
   if (step === 'purpose') return ask_('這張是自己要去的，還是要轉賣？', step, [['self', '自己去'], ['resale', '要轉賣']]);
+  if (step === 'attend') {
+    const n = Math.max(1, num_(d.ticketCount) || 1);
+    const names = knownNames_();
+    const opts = [];
+    if (n >= 2 && names.length >= 2) opts.push([names[0] + ':1,' + names[1] + ':' + (n - 1), names[0] + '＋' + names[1] + (n > 2 ? '（' + names[1] + ' ' + (n - 1) + ' 張）' : '')]);
+    names.forEach(function (x) { opts.push([x + ':' + n, n > 1 ? x + ' ' + n + ' 張' : x]); });
+    return ask_('這筆（' + n + ' 張）誰要去？其他組合可以直接打字，例如「Chi 1 Jhen 1」', step, opts.slice(0, 12));
+  }
   if (step === 'eventType') return ask_('專場還是拼盤？', step, [['專場', '專場'], ['拼盤', '拼盤']]);
   if (step === 'platform') return ask_('在哪個平台買的？（其他平台可以直接打字）', step, pairs(LINE_PLATFORMS));
   if (step === 'account') return ask_('用哪個帳號買的？可以直接打字（名字、信箱、帳號或電話）', step, pairs(knownValues_('ticketAccount', d.platform)).concat(skip));
@@ -654,6 +664,47 @@ function topPayers_() {
   return countValues_(ledgerRows_().filter(function (l) { return l.category === 'ticket'; }), 'payer').slice(0, 3);
 }
 
+// 加入機器人的人＋常付款的人，當作「誰要去」的選項
+function knownNames_() {
+  const out = [];
+  Object.keys(lineUsers_()).forEach(function (id) { const n = (lineUsers_()[id] || {}).name; if (n && out.indexOf(n) < 0) out.push(n); });
+  topPayers_().forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); });
+  return out.slice(0, 6);
+}
+// 「Chi:1,Jhen:1」（按鈕）或打字「Chi 1 Jhen 1」「只有 Jhen」「我跟 Jhen」→ [{name, count}]
+function parseAttend_(v, total, meName) {
+  let list = [];
+  if (/^[^:,]+:\d+(,[^:,]+:\d+)*$/.test(v)) {
+    list = v.split(',').map(function (x) { const p = x.split(':'); return { name: p[0], count: Number(p[1]) }; });
+  } else {
+    const text = v.replace(/只有|要去|去|的票|張/g, ' ').replace(/我/g, ' ' + (meName || '我') + ' ');
+    const re = /([^\s,，、+＋和跟與及0-9×xX*]+)\s*[×xX*]?\s*(\d+)?/g;
+    let m;
+    while ((m = re.exec(text))) { if (m[1].trim()) list.push({ name: m[1].trim(), count: m[2] ? Number(m[2]) : 0 }); }
+    const missing = list.filter(function (x) { return !x.count; });
+    if (missing.length) {
+      const given = list.reduce(function (t, x) { return t + x.count; }, 0);
+      const left = Math.max(missing.length, total - given);
+      missing.forEach(function (x, i) { x.count = i === 0 ? left - (missing.length - 1) : 1; });
+    }
+  }
+  const merged = [];
+  list.forEach(function (x) {
+    if (!x.name || !(x.count > 0)) return;
+    const hit = merged.filter(function (y) { return y.name === x.name; })[0];
+    if (hit) hit.count += x.count; else merged.push({ name: x.name, count: x.count });
+  });
+  return merged;
+}
+const attendLabel_ = function (list) {
+  return (list || []).map(function (x) { return x.name + (x.count > 1 ? ' ×' + x.count : ''); }).join('、');
+};
+function attendSplits_(list, total, amountTwd) {
+  if (!list.length || !amountTwd) return [];
+  const per = amountTwd / Math.max(1, total);
+  return list.map(function (x) { return { name: x.name, count: x.count, amountTwd: Math.round(per * x.count), settled: false }; });
+}
+
 function parsePickup_(text, d) {
   const m = text.match(/(\d+)\s*[天日]/);
   if (m && /前/.test(text)) return minusDays_(d.date, Number(m[1]));
@@ -674,6 +725,13 @@ function applyAnswer_(s, step, v, typed) {
   const d = s.d;
   v = str_(v);
   if (!v) return false;
+  if (step === 'attend') {
+    const list = parseAttend_(v, num_(d.ticketCount) || 1, s.meName);
+    if (!list.length) return false;
+    d.attend = list;
+    s.asked.attend = true;
+    return true;
+  }
   if (step === 'purpose') {
     if (typed) v = /轉|賣|讓/.test(v) ? 'resale' : /自己|去|我/.test(v) ? 'self' : '';
     if (v !== 'self' && v !== 'resale') return false;
@@ -734,6 +792,7 @@ function card_(d) {
         { type: 'text', text: [d.date, d.time].filter(Boolean).join(' ') + (d.venue ? '｜' + [d.city, d.venue].filter(Boolean).join(' ') : '') || '—', size: 'sm', color: '#9C917F', wrap: true },
         { type: 'separator', margin: 'md' },
         row('類型', [d.eventType, d.artist].filter(Boolean).join('｜')),
+        d.purpose === 'resale' ? null : row('誰要去', attendLabel_(d.attend)),
         row('票種', d.ticketType),
         row('座位', seatText_({ ticketArea: d.area, ticketRow: d.row, ticketSeat: d.seat })),
         row('張數', d.ticketCount + ' 張'),
@@ -746,7 +805,7 @@ function card_(d) {
         row('取票', [d.pickupMethod, d.pickupDate || '隨時'].filter(Boolean).join('｜')),
         row('訂單', d.orderNumber),
         { type: 'text', text: '要修改直接打字告訴我，例如「座位改成5排18號」', size: 'xxs', color: '#9C917F', wrap: true, margin: 'md' },
-      ] },
+      ].filter(Boolean) },
       footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
         button('確認建檔', 'confirm', 'primary'), button('要修改', 'edit', 'secondary'), button('取消這筆', 'cancel', 'link'),
       ] },
@@ -765,18 +824,21 @@ const EDIT_SCHEMA = {
     totalPaid: { type: 'NUMBER' }, amountTwd: { type: 'NUMBER' }, orderNumber: { type: 'STRING' },
     pickupDate: { type: 'STRING' }, pickupMethod: { type: 'STRING' }, platform: { type: 'STRING' }, account: { type: 'STRING' },
     payMethod: { type: 'STRING' }, payDetail: { type: 'STRING' }, payer: { type: 'STRING' }, purpose: { type: 'STRING' },
+    attend: { type: 'STRING' },
   },
   required: ['understood'],
 };
 function editDraft_(d, text) {
   const view = {};
   Object.keys(EDIT_SCHEMA.properties).forEach(function (k) { if (k !== 'understood') view[k] = d[k]; });
+  view.attend = (d.attend || []).map(function (x) { return x.name + ' ' + x.count; }).join('、');
   const prompt = [
     '以下是一筆購票紀錄（JSON）：', JSON.stringify(view),
     '使用者說：「' + text + '」',
     '請輸出 understood: true，並只包含使用者要修改的欄位，沒提到的欄位不要輸出。',
     'purpose 只能是 self（自己去）或 resale（要轉賣）；payMethod 只能是 credit_card、bank_transfer、mobile_payment、cash；',
     'eventType 只能是 專場 或 拼盤；日期用 YYYY-MM-DD，時間用 HH:MM；座位的排、號只填數字或代號。',
+    'attend 是誰要去，格式「名字 張數、名字 張數」（例：Chi 1、Jhen 1）。',
     '如果「演出前 N 天取票」，pickupDate 用演出日期往前推 N 天。看不懂使用者要改什麼，就只輸出 understood: false。',
   ].join('\n');
   const r = gemini_([{ text: prompt }], EDIT_SCHEMA);
@@ -788,6 +850,11 @@ function editDraft_(d, text) {
   Object.keys(changes).forEach(function (k) {
     if (k === 'understood' || !(k in view)) return;
     const before = d[k];
+    if (k === 'attend') {
+      const list = parseAttend_(str_(changes.attend), num_(d.ticketCount) || 1, '');
+      if (list.length) { d.attend = list; changed.push(k); }
+      return;
+    }
     d[k] = typeof changes[k] === 'number' ? changes[k] : str_(changes[k]);
     changed.push(k);
     if (ALIAS_FIELDS[k] && str_(before) && d[k] && normName_(before) !== normName_(d[k])) offers.push({ f: k, from: str_(before), to: d[k] });
@@ -853,6 +920,10 @@ function onLineText_(token, uid, me, users, text) {
 
 function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'picked') return markPicked_(token, pb.v);
+  if (pb.a === 'view') {
+    const parts = pb.v.split('|'), all = parts[1] === 'all';
+    return lineReply_(token, parts[0] === 'pickup' ? pickupListMessage_(me.name, all) : upcomingText_({}, me.name, all));
+  }
   if (pb.a === 'alias') return saveAliases_(token, pb.v, me);
   if (pb.a === 'ogot' && pb.v.indexOf('miss:') === 0) return onsaleMark_(token, uid, 'omiss', pb.v.slice(5));
   if (['watch', 'unwatch', 'ogot', 'omiss'].indexOf(pb.a) >= 0) return onsaleMark_(token, uid, pb.a, pb.v);
@@ -1073,7 +1144,7 @@ function commitLine_(d, me, existingId) {
       createdAt: today_(), settled: '',
       ticketFaceTwd: foreign ? '' : num_(d.unitFace) || '', ticketBenefitTwd: foreign ? '' : num_(d.unitBenefit) || '',
       ticketFeeTwd: foreign ? '' : num_(d.unitFee) || '', ticketPlatform: d.platform, ticketAccount: d.account, ticketCount: count,
-      splits: JSON.stringify(me.name && amountTwd ? [{ name: me.name, count: 1, amountTwd: Math.round(amountTwd / count), settled: false }] : []),
+      splits: JSON.stringify(attendSplits_((d.attend || []).length ? d.attend : (me.name ? [{ name: me.name, count: count }] : []), count, amountTwd)),
       ticketPickupDate: d.pickupDate, ticketPickedUp: false, ticketOrderNumber: d.orderNumber, ticketPickupMethod: d.pickupMethod,
     };
     writeRows_('ledger', [ledger]);
@@ -1209,6 +1280,8 @@ function agendaMessage_(title, entries, opts) {
     cur.push(e);
   });
   if (cur.length) pages.push(cur);
+  const realCount = function (list) { return list.filter(function (x) { return !x.section; }).length; };
+  const hidden = realCount(entries) - pages.slice(0, 12).reduce(function (t, pg) { return t + realCount(pg); }, 0);
   const bubbles = pages.slice(0, 12).map(function (pg, pi) {
     const body = [ftext_(title, 'md', C_INK, { weight: 'bold' })];
     if (opts.sub) body.push(ftext_(opts.sub, 'xs', C_MUTED));
@@ -1217,7 +1290,9 @@ function agendaMessage_(title, entries, opts) {
       body.push(agendaRow_(e));
     });
     if (pages.length > 1) body.push(ftext_((pi + 1) + ' / ' + Math.min(pages.length, 12) + (pi < pages.length - 1 ? '　往左滑看更多 →' : ''), 'xxs', C_MUTED, { margin: 'xl', align: 'end' }));
-    if (opts.foot && pi === pages.length - 1) body.push(ftext_(opts.foot, 'xxs', C_MUTED, { margin: 'xl' }));
+    const last = pi === Math.min(pages.length, 12) - 1;
+    if (last && hidden) body.push(ftext_('還有 ' + hidden + ' 筆沒列出來，可以直接打字縮小範圍，例如「DAY6 的場次」。', 'xxs', C_ACCENT, { margin: 'xl' }));
+    if (opts.foot && last) body.push(ftext_(opts.foot, 'xxs', C_MUTED, { margin: 'xl' }));
     return { type: 'bubble', size: 'giga', body: { type: 'box', layout: 'vertical', spacing: 'none', contents: body } };
   });
   const msg = { type: 'flex', altText: title, contents: bubbles.length === 1 ? bubbles[0] : { type: 'carousel', contents: bubbles } };
@@ -1227,16 +1302,42 @@ function agendaMessage_(title, entries, opts) {
 const placeText_ = function (it) { return [it.city, it.venue].filter(Boolean).join(' '); };
 const pre_ = function (icon, v) { return str_(v) ? icon + ' ' + str_(v) : ''; };
 
-function upcomingText_(q) {
+function upcomingText_(q, name, all) {
   const today = today_();
-  const list = sheetRows_('events').filter(function (e) { return String(e.startDate) >= today && matchEvent_(e, q) && inPeriod_(e.startDate, q); })
+  const ledger = sheetRows_('ledger');
+  const mine = function (e) {
+    const t = ledger.filter(function (l) { return l.eventId === e.id && l.category === 'ticket'; });
+    return !t.length || t.some(function (l) { return ticketIsMine_(l, name); });
+  };
+  const list = sheetRows_('events').filter(function (e) { return String(e.startDate) >= today && matchEvent_(e, q) && inPeriod_(e.startDate, q) && (all || !name || mine(e)); })
     .sort(function (a, b) { return String(a.startDate + a.startTime).localeCompare(String(b.startDate + b.startTime)); });
-  if (!list.length) return '沒有符合的未來場次。';
-  return agendaMessage_('接下來的場次', list.slice(0, 72).map(function (e) {
-    return { date: e.startDate, time: e.startTime, top: e.artist, title: e.name, lines: [pre_('📍', placeText_(e))] };
-  }), { sub: '共 ' + list.length + ' 場' });
+  const toggle = viewToggle_('upcoming', all, name);
+  if (!list.length) {
+    const m = { type: 'text', text: all || !name ? '沒有符合的未來場次。' : '沒有你要去的未來場次。' };
+    if (toggle) m.quickReply = { items: [toggle] };
+    return m;
+  }
+  const msg = agendaMessage_('接下來的場次', list.slice(0, 72).map(function (e) {
+    const who = [];
+    ledger.forEach(function (l) {
+      if (l.eventId !== e.id || l.category !== 'ticket') return;
+      jsonList_(l.splits).forEach(function (x) { if (x.name && num_(x.count) > 0 && who.indexOf(x.name) < 0) who.push(x.name); });
+    });
+    return { date: e.startDate, time: e.startTime, top: e.artist, title: e.name, lines: [pre_('📍', placeText_(e)), pre_('👥', who.join('、'))] };
+  }), { sub: '共 ' + list.length + ' 場｜' + viewSub_(all, name) });
+  if (toggle) msg.quickReply = { items: [toggle] };
+  return msg;
 }
 
+function ticketIsMine_(l, name) {
+  if (!name) return true;
+  const sp = jsonList_(l.splits).filter(function (x) { return x.name; });
+  return !sp.length || sp.some(function (x) { return x.name === name; }) || l.payer === name;
+}
+const whoText_ = function (l) {
+  const sp = jsonList_(l.splits).filter(function (x) { return x.name && num_(x.count) > 0; });
+  return sp.map(function (x) { return x.name + (num_(x.count) > 1 ? ' ×' + num_(x.count) : ''); }).join('、');
+};
 // 自己的票（總帳）與轉賣的票（讓票頁）整理成同一種格式；一筆紀錄＝一張訂單
 const dateW_ = function (date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date || '日期未定';
@@ -1253,6 +1354,7 @@ function ownItem_(l, ev) {
     face: num_(l.ticketFaceTwd) || Math.round(num_(l.amountTwd) / count), fee: num_(l.ticketFaceTwd) ? num_(l.ticketFeeTwd) : 0,
     pickupDate: l.ticketPickupDate,
     pickupMethod: l.ticketPickupMethod, platform: l.ticketPlatform, account: l.ticketAccount, picked: isPicked_(l),
+    who: whoText_(l), payer: l.payer, raw: l,
   };
 }
 function transferItem_(t, ev) {
@@ -1270,6 +1372,7 @@ function transferItem_(t, ev) {
     pickupMethod: t.pickupMethod || noteField_(t.notes, /取票：([^｜]+)/),
     platform: t.platform || noteField_(t.notes, /平台：([^｜]+)/), account: t.account || noteField_(t.notes, /帳號：([^｜]+)/),
     picked: String(t.pickedUp) === 'true', sold: String(t.settled) === 'true' || num_(t.amountTwd) > 0,
+    payer: noteField_(t.notes, /付款人：([^｜]+)/),
   };
 }
 // 每筆：YYYY/MM/DD(星期) 時間／演出者｜活動名稱／地點／座位 ×張數
@@ -1285,37 +1388,49 @@ function pickupStatus_(it, today) {
   const p = it.pickupDate;
   return [!p || p <= today ? '✅ 現在可取' : '⏳ ' + dateW_(p) + ' 起可取', it.pickupMethod, [it.platform, it.account].filter(Boolean).join(' ')].filter(Boolean).join('｜');
 }
-function pendingPickups_(today) {
+function pendingPickups_(today, name) {
   const events = sheetRows_('events');
   const byId = {};
   events.forEach(function (e) { byId[e.id] = e; });
-  const own = pendingTickets_(sheetRows_('ledger'), events, today).map(function (x) { return ownItem_(x.l, x.ev); });
+  const own = pendingTickets_(sheetRows_('ledger'), events, today).filter(function (x) { return ticketIsMine_(x.l, name); })
+    .map(function (x) { return ownItem_(x.l, x.ev); });
   const resale = sheetRows_('transfers').filter(function (t) { return t.kind !== '退票'; })
     .map(function (t) { return transferItem_(t, byId[t.eventId]); })
-    .filter(function (it) { return !it.picked && String(it.date || '9999') >= today; });
+    .filter(function (it) { return !it.picked && String(it.date || '9999') >= today && (!name || !it.payer || it.payer === name); });
   const byPickup = function (a, b) { return String(a.pickupDate || '0000').localeCompare(String(b.pickupDate || '0000')) || String(a.date).localeCompare(String(b.date)); };
   return { own: own.sort(byPickup), resale: resale.sort(byPickup) };
 }
-function pickupListMessage_() {
+const viewToggle_ = function (kind, all, name) {
+  if (!name) return null;
+  return { type: 'action', action: { type: 'postback', label: all ? '只看我的' : '看全部', data: 'a=view&v=' + kind + (all ? '|mine' : '|all'), displayText: all ? '只看我的' : '看全部' } };
+};
+const viewSub_ = function (all, name) { return !name ? '' : all ? '大家的都列出來' : '只列跟 ' + name + ' 有關的（含以前的共同票）'; };
+
+function pickupListMessage_(name, all) {
   const today = today_();
-  const p = pendingPickups_(today);
-  if (!p.own.length && !p.resale.length) return '目前沒有待取的票 ✦';
+  const p = pendingPickups_(today, all ? '' : name);
+  if (!p.own.length && !p.resale.length) {
+    return ask_(all || !name ? '目前沒有待取的票 ✦' : '目前沒有你要取的票 ✦', 'view', all || !name ? [] : [['pickup|all', '看全部']]);
+  }
   const entry = function (it) {
     const ready = !it.pickupDate || it.pickupDate <= today;
     return {
       date: it.date, time: it.time, top: it.artist, title: it.name,
       lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, it.count > 1 ? '×' + it.count + ' 張' : ''].filter(Boolean).join('　')),
-        [it.pickupMethod, [it.platform, it.account].filter(Boolean).join(' ')].filter(Boolean).join('｜')],
+        pre_('👥', it.who), [it.pickupMethod, [it.platform, it.account].filter(Boolean).join(' ')].filter(Boolean).join('｜')],
       status: ready ? '✅ 現在可取' : '⏳ ' + dateW_(it.pickupDate) + ' 起可取', statusColor: ready ? C_OK : C_ACCENT,
     };
   };
   const entries = (p.own.length ? [{ section: '🎫 自己的票（' + p.own.length + '）' }].concat(p.own.map(entry)) : [])
     .concat(p.resale.length ? [{ section: '🔁 轉賣的票（' + p.resale.length + '）' }].concat(p.resale.map(entry)) : []);
-  // 按鈕最多 13 個：演出日期近的排前面，標籤用「日期＋演出者」比較短
-  const buttons = p.own.concat(p.resale).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).slice(0, 13).map(function (it) {
+  // 按鈕最多 13 個（第一個是切換看全部／只看我的）：演出日期近的排前面，標籤用「日期＋演出者」比較短
+  const toggle = viewToggle_('pickup', all, name);
+  const buttons = p.own.concat(p.resale).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).slice(0, toggle ? 12 : 13).map(function (it) {
     return [(it.kind === 'resale' ? 't:' : '') + it.id, (it.kind === 'resale' ? '已取(轉) ' : '已取 ') + shortMD_(it.date) + ' ' + (it.artist || it.name)];
   });
-  return agendaMessage_('待取票', entries, { foot: '取完票可以點下方按鈕標記。', step: 'picked', quick: buttons });
+  const msg = agendaMessage_('待取票', entries, { sub: viewSub_(all, name), foot: '取完票可以點下方按鈕標記。', step: 'picked', quick: buttons });
+  if (toggle) msg.quickReply = { items: [toggle].concat(msg.quickReply ? msg.quickReply.items : []) };
+  return msg;
 }
 
 function spendText_(q, me) {
@@ -1403,8 +1518,8 @@ function answerQuestion_(text, me) {
   q.keyword = str_(q.keyword);
   q.year = num_(q.year);
   q.month = num_(q.month);
-  if (q.intent === 'upcoming') return upcomingText_(q);
-  if (q.intent === 'pickup') return pickupListMessage_();
+  if (q.intent === 'upcoming') return upcomingText_(q, me.name, false);
+  if (q.intent === 'pickup') return pickupListMessage_(me.name, false);
   if (q.intent === 'spend') return spendText_(q, me);
   if (q.intent === 'count') return countText_(q);
   if (q.intent === 'resale') return resaleText_();
@@ -1414,8 +1529,10 @@ function answerQuestion_(text, me) {
 
 function lineCommand_(text, me) {
   const t = text.replace(/\s/g, '');
-  if (t === '未來場次') return upcomingText_({});
-  if (t === '待取票') return pickupListMessage_();
+  if (t === '未來場次') return upcomingText_({}, me.name, false);
+  if (t === '待取票') return pickupListMessage_(me.name, false);
+  if (t === '未來場次全部') return upcomingText_({}, me.name, true);
+  if (t === '待取票全部') return pickupListMessage_(me.name, true);
   if (t === '本月花費') return spendText_({}, me);
   if (t === '轉賣中') return resaleText_();
   if (t === '即將開賣') return onsaleListMessage_(me.uid, {});

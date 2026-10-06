@@ -187,6 +187,19 @@ function scanTicket_(req) {
   return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '）：' + lastMsg };
 }
 
+// 檢查工具：在 Apps Script 編輯器選 testGemini →「執行」，下方「執行記錄」會顯示金鑰與模型是否可用
+function testGemini() {
+  const apiKey = PROPS.getProperty('GEMINI_API_KEY');
+  if (!apiKey) { Logger.log('找不到指令碼屬性 GEMINI_API_KEY（名稱要完全一樣，大寫、底線）'); return; }
+  Logger.log('金鑰長度 ' + apiKey.length + '，開頭 ' + apiKey.slice(0, 4));
+  GEMINI_MODELS.forEach(function (m) {
+    const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m, {
+      headers: { 'x-goog-api-key': apiKey }, muteHttpExceptions: true,
+    });
+    Logger.log(m + ' → ' + res.getResponseCode() + (res.getResponseCode() === 200 ? ' 可用' : ' ' + res.getContentText().slice(0, 300)));
+  });
+}
+
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }

@@ -112,7 +112,8 @@ const NUMF = {
   sales: ['unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity'],
   events: ['ticketPriceTwd'],
   ledger: ['amountTwd', 'originalAmount', 'exchangeRate', 'expectedReceivableTwd', 'receivedTwd', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketCount'],
-  transfers: ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd'],
+  transfers: ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd', 'receivedTwd'],
+  onsales: [],
 };
 const BOOLF = {
   orders: ['settled'],
@@ -120,7 +121,8 @@ const BOOLF = {
   sales: ['managedByOwnership'],
   events: ['settled'],
   ledger: ['ticketPickedUp'],
-  transfers: ['settled'],
+  transfers: ['settled', 'delivered'],
+  onsales: [],
 };
 
 /* ---------- 設定與快取 ---------- */
@@ -130,6 +132,7 @@ const saveCfg = () => localStorage.setItem('sl-config', JSON.stringify(CFG));
 
 let DB = JSON.parse(localStorage.getItem('sl-db') || 'null') || { orders: [], sales: [], events: [], ledger: [] };
 DB.transfers = DB.transfers || [];
+DB.onsales = DB.onsales || [];
 const saveDB = () => localStorage.setItem('sl-db', JSON.stringify(DB));
 const isDirty = () => localStorage.getItem('sl-dirty') === '1';
 const markDirty = () => localStorage.setItem('sl-dirty', '1');
@@ -166,6 +169,7 @@ function assembleDB(raw) {
     events: (raw.events || []).map(r => normRow('events', r)),
     ledger: (raw.ledger || []).map(r => normRow('ledger', r)),
     transfers: (raw.transfers || []).map(r => normRow('transfers', r)),
+    onsales: (raw.onsales || []).map(r => normRow('onsales', r)),
   };
 }
 function orderItemRows(order) {
@@ -942,12 +946,17 @@ function bindSales(view) {
 
 /* ----- 活動 ----- */
 function renderEvents(view) {
-  const segs = [['list', '場次'], ['stats', '統計']];
+  const segs = [['list', '場次'], ['onsale', '即將開賣'], ['stats', '統計']];
   let html = '<div class="seg">' + segs.map(([k, l]) =>
     `<button data-eseg="${k}" class="${state.evSeg === k ? 'on' : ''}">${l}</button>`).join('') + '</div>';
-  html += state.evSeg === 'stats' ? eventStatsHtml() : eventListHtml();
+  html += state.evSeg === 'stats' ? eventStatsHtml() : state.evSeg === 'onsale' ? onsaleListHtml() : eventListHtml();
   view.innerHTML = html;
   $$('[data-eseg]', view).forEach(b => b.onclick = () => { state.evSeg = b.dataset.eseg; render(); });
+  if (state.evSeg === 'onsale') {
+    $$('[data-onsale]', view).forEach(el => el.onclick = () => openOnsaleForm(el.dataset.onsale));
+    $$('[data-onsale-past]', view).forEach(b => b.onclick = () => { state.onsalePast = !state.onsalePast; render(); });
+    return;
+  }
   if (state.evSeg === 'stats') {
     $$('[data-year]', view).forEach(b => b.onclick = () => { state.statYear = b.dataset.year; render(); });
     return;
@@ -1023,6 +1032,128 @@ function eventListHtml() {
   </div>`).join('');
   return html;
 }
+/* ----- 即將開賣（搶票提醒；LINE 傳售票公告建立，這裡可以修改、刪除、手動新增） ----- */
+const saleAtText = at => {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(at || '')) return at || '時間未定';
+  const d = new Date(at.slice(0, 10) + 'T00:00:00');
+  return `${Number(at.slice(5, 7))}/${Number(at.slice(8, 10))}(${'日一二三四五六'[d.getDay()]}) ${at.slice(11, 16)}`;
+};
+function onsaleGroups() {
+  const m = {};
+  (DB.onsales || []).forEach(r => { (m[r.groupId] = m[r.groupId] || []).push(r); });
+  return Object.entries(m).map(([id, rows]) => {
+    rows.sort((a, b) => String(a.saleAt).localeCompare(String(b.saleAt)));
+    return { id, rows, first: rows[0], last: rows[rows.length - 1].saleAt };
+  });
+}
+function onsaleListHtml() {
+  const now = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const groups = onsaleGroups().sort((a, b) => String(a.last).localeCompare(String(b.last)));
+  const upcoming = groups.filter(g => String(g.last) >= now.slice(0, 10));
+  const past = groups.filter(g => String(g.last) < now.slice(0, 10)).reverse();
+  const card = g => {
+    const watchers = (() => { try { return JSON.parse(g.first.watchers || '[]').length; } catch (e) { return 0; } })();
+    return `<div class="card tappable" data-onsale="${esc(g.id)}">
+      <div class="row-head"><div class="row-title">${esc(g.first.title || '未命名')}</div>${watchers ? `<span class="badge accent">${watchers} 人要搶</span>` : ''}</div>
+      <div class="row-meta">${g.first.artist ? `<span>${esc(g.first.artist)}</span>` : ''}${g.first.venue ? `<span>${esc([g.first.city, g.first.venue].filter(Boolean).join(' '))}</span>` : ''}</div>
+      ${g.rows.map(r => `<div class="row-meta"><span>🎫 ${esc(r.phase || '開賣')}　${esc(saleAtText(r.saleAt))}${r.platform ? '｜' + esc(r.platform) : ''}</span></div>`).join('')}
+      ${g.first.notes ? `<div class="row-meta"><span>⚠ ${esc(g.first.notes)}</span></div>` : ''}
+    </div>`;
+  };
+  let html = `<div class="section-note">在 LINE 傳售票公告就會建立；這裡可以修改、刪除，或按右下角＋手動新增</div>`;
+  html += upcoming.length ? upcoming.map(card).join('') : emptyHtml('目前沒有即將開賣的節目');
+  if (past.length) {
+    html += `<button class="btn line" data-onsale-past>${state.onsalePast ? '收起' : '看'}已經開賣過的（${past.length}）</button>`;
+    if (state.onsalePast) html += past.map(card).join('');
+  }
+  return html;
+}
+function openOnsaleForm(groupId) {
+  const g = groupId ? onsaleGroups().find(x => x.id === groupId) : null;
+  const base = g ? g.first : { title: '', artist: '', venue: '', city: '', showDates: '', price: '', notes: '' };
+  let phases = g ? g.rows.map(r => ({ id: r.id, phase: r.phase, saleAt: r.saleAt, platform: r.platform })) : [{ id: '', phase: '全面開賣', saleAt: '', platform: '' }];
+  const phaseRow = (p, i) => `<div class="item-block" style="padding:10px 12px 4px">
+    <div class="field-row">
+      ${fieldHtml('階段', `<input data-ph="phase" data-pi="${i}" value="${esc(p.phase)}" placeholder="會員預售">`)}
+      ${fieldHtml('平台', `<input data-ph="platform" data-pi="${i}" list="dl-tplatform2" value="${esc(p.platform)}">`)}
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-end">
+      <div class="field" style="flex:1">${'<label>開賣時間</label>'}<input data-ph="saleAt" data-pi="${i}" type="datetime-local" value="${esc(String(p.saleAt || '').replace(' ', 'T'))}"></div>
+      <button class="icon-mini danger" data-del-phase="${i}" aria-label="刪除這一波" style="margin-bottom:12px">${ICONS.trash}</button>
+    </div>
+  </div>`;
+  const html = `
+  ${sheetTitleHtml(g ? '編輯搶票提醒' : '新增搶票提醒', !!g, 'onsale-del')}
+  ${fieldHtml('節目名稱', `<input id="o-title" value="${esc(base.title)}">`)}
+  <div class="field-row">
+    ${fieldHtml('表演者', `<input id="o-artist" value="${esc(base.artist)}">`)}
+    ${fieldHtml('城市', `<input id="o-city" value="${esc(base.city)}">`)}
+  </div>
+  ${fieldHtml('場館', `<input id="o-venue" value="${esc(base.venue)}">`)}
+  ${fieldHtml('演出場次', `<input id="o-showDates" placeholder="例：2026-12-05 19:00、2026-12-06 18:00" value="${esc(base.showDates)}">`)}
+  <div class="form-section">開賣時間 <button class="btn line small" id="add-phase">＋ 加一波</button></div>
+  <datalist id="dl-tplatform2">${datalistOptions(TICKET_PLATFORMS)}</datalist>
+  <div id="phases-wrap"></div>
+  ${fieldHtml('票價', `<input id="o-price" value="${esc(base.price)}">`)}
+  ${fieldHtml('注意事項', `<textarea id="o-notes" rows="2">${esc(base.notes)}</textarea>`)}
+  <div class="hint">開賣前一天晚上和開賣前會在 LINE 提醒按了「我也要搶」的人；改了開賣時間會重新提醒。</div>
+  <div class="sheet-actions"><button class="btn primary" id="onsale-save">儲存</button></div>`;
+  openSheet(html);
+  $('#sh-close').onclick = closeSheet;
+  const readPhases = () => $$('#phases-wrap [data-ph]').forEach(inp => {
+    const p = phases[Number(inp.dataset.pi)];
+    if (p) p[inp.dataset.ph] = inp.dataset.ph === 'saleAt' ? inp.value.replace('T', ' ') : inp.value.trim();
+  });
+  const drawPhases = () => {
+    $('#phases-wrap').innerHTML = phases.map(phaseRow).join('');
+    $$('#phases-wrap [data-del-phase]').forEach(b => b.onclick = () => { readPhases(); phases.splice(Number(b.dataset.delPhase), 1); drawPhases(); });
+  };
+  drawPhases();
+  $('#add-phase').onclick = () => { readPhases(); phases.push({ id: '', phase: '', saleAt: '', platform: '' }); drawPhases(); };
+  $('#onsale-save').onclick = () => {
+    readPhases();
+    const info = {};
+    ['title', 'artist', 'city', 'venue', 'showDates', 'price', 'notes'].forEach(k => { info[k] = $('#o-' + k).value.trim(); });
+    if (!info.title) { toast('請填節目名稱'); return; }
+    const valid = phases.filter(p => p.saleAt);
+    if (!valid.length) { toast('至少要有一波開賣時間'); return; }
+    const gid = g ? g.id : uid();
+    const keep = g ? g.first : { watchers: '[]', done: '[]', createdBy: CFG.myName || '', createdAt: today() };
+    const old = {};
+    (g ? g.rows : []).forEach(r => { old[r.id] = r; });
+    const rows = valid.map(p => {
+      const prev = p.id && old[p.id];
+      const same = prev && prev.saleAt === p.saleAt;
+      return Object.assign({}, prev || {}, info, {
+        id: prev ? prev.id : uid(), groupId: gid, phase: p.phase || '開賣', saleAt: p.saleAt, platform: p.platform,
+        watchers: prev ? prev.watchers : keep.watchers, done: prev ? prev.done : keep.done,
+        sentEve: same ? prev.sentEve : '', sentLead: same ? prev.sentLead : '',
+        createdBy: prev ? prev.createdBy : keep.createdBy, createdAt: prev ? prev.createdAt : keep.createdAt,
+      });
+    });
+    const removed = Object.keys(old).filter(id => !rows.some(r => r.id === id));
+    DB.onsales = (DB.onsales || []).filter(r => r.groupId !== gid).concat(rows);
+    saveDB();
+    const ops = [{ action: 'upsert', table: 'onsales', rows }];
+    if (removed.length) ops.push({ action: 'delete', table: 'onsales', ids: removed });
+    pushOps(ops);
+    closeSheet();
+    render();
+    toast('已儲存搶票提醒');
+  };
+  if (g) {
+    $('#onsale-del').onclick = () => {
+      if (!confirm('刪除這個搶票提醒？之後不會再提醒。')) return;
+      DB.onsales = DB.onsales.filter(r => r.groupId !== g.id);
+      saveDB();
+      pushOps([{ action: 'delete', table: 'onsales', ids: g.rows.map(r => r.id) }]);
+      closeSheet();
+      render();
+      toast('已刪除');
+    };
+  }
+}
+
 function topCount(list, keyFn) {
   const m = {};
   list.forEach(e => {
@@ -1168,32 +1299,55 @@ const lgSegHtml = on => `<div class="seg">
 function bindLgSeg(view) {
   $$('[data-lgseg]', view).forEach(b => b.onclick = () => { state.lgSeg = b.dataset.lgseg; state.openGroups = {}; render(); });
 }
+// 轉賣階段不用手動選：依買家、成交價、已收、已給票自動判斷
+const STAGES = {
+  sale: { label: '待售', cls: '' }, talk: { label: '洽談中', cls: 'warn' }, deposit: { label: '收訂金', cls: 'warn' },
+  deliver: { label: '待給票', cls: 'accent' }, done: { label: '完成', cls: 'ok' }, refund: { label: '退票', cls: '' },
+};
+// 舊資料沒有「已收」「已給票」：勾過已收款的當作已完成
+const transferReceived = t => t.receivedTwd === '' || t.receivedTwd == null ? (t.settled ? num(t.amountTwd) : 0) : num(t.receivedTwd);
+const transferDelivered = t => !!t.delivered || ((t.receivedTwd === '' || t.receivedTwd == null) && !!t.settled);
+function transferStage(t) {
+  if (t.kind === '退票') return 'refund';
+  if (transferDelivered(t)) return 'done';
+  const got = transferReceived(t), price = num(t.amountTwd);
+  if (!t.person && !got) return 'sale'; // 還沒有買家（就算先填了售價）
+  if (got <= 0) return 'talk';
+  if (price && got < price) return 'deposit';
+  return 'deliver';
+}
+const stageBadge = t => { const st = STAGES[transferStage(t)]; return `<span class="badge ${st.cls}">${st.label}</span>`; };
+
 function transfersHtml() {
-  const list = (DB.transfers || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const order = { talk: 0, deposit: 1, deliver: 2, sale: 3, done: 4, refund: 5 };
+  const list = (DB.transfers || []).slice().sort((a, b) =>
+    (order[transferStage(a)] - order[transferStage(b)]) || String(a.date).localeCompare(String(b.date)));
   if (!list.length) return emptyHtml('還沒有讓票／換票紀錄，點右下角＋新增');
-  const unsettledSum = list.reduce((s, t) => s + (t.settled ? 0 : num(t.amountTwd)), 0);
-  let html = `<div class="stat-strip" style="grid-template-columns:repeat(2,1fr)">
-    <div class="stat"><div class="n">${list.length}</div><div class="l">紀錄筆數</div></div>
-    <div class="stat"><div class="n">${fmtInt(unsettledSum)}</div><div class="l">未收 TWD</div></div>
-  </div>`;
+  const active = list.filter(t => !['done', 'refund'].includes(transferStage(t)));
+  const owed = active.reduce((s, t) => s + Math.max(0, num(t.amountTwd) - transferReceived(t)), 0);
+  let html = `<div class="stat-strip" style="grid-template-columns:repeat(3,1fr)">
+    <div class="stat"><div class="n">${active.length}</div><div class="l">進行中</div></div>
+    <div class="stat"><div class="n">${active.filter(t => transferStage(t) === 'sale').length}</div><div class="l">待售</div></div>
+    <div class="stat"><div class="n">${fmtInt(owed)}</div><div class="l">還沒收 TWD</div></div>
+  </div>
+  <div class="section-note">階段會依買家、成交價、已收、已給票自動變化</div>`;
   html += list.map(t => {
     const ev = DB.events.find(e => e.id === t.eventId);
     const seat = seatText({ ticketArea: t.ticketArea, ticketRow: t.ticketRow, ticketSeat: t.ticketSeat });
+    const st = transferStage(t), got = transferReceived(t), price = num(t.amountTwd);
     return `<div class="card tappable" data-transfer="${esc(t.id)}">
       <div class="row-head">
-        <div class="row-title"><span class="badge accent">${esc(t.kind || '讓票')}</span> ${esc(t.title || (ev ? eventTitle(ev) : (t.notes || '未指定活動')))}</div>
-        ${num(t.amountTwd) ? `<div class="amount">${fmtInt(t.amountTwd)}</div>` : ''}
+        <div class="row-title">${stageBadge(t)} ${esc(t.title || (ev ? eventTitle(ev) : (t.notes || '未指定活動')))}</div>
+        ${price ? `<div class="amount">${fmtInt(price)}</div>` : ''}
       </div>
       <div class="row-meta">
         <span>${esc(t.date || '')}</span>
-        ${t.person ? `<span>讓給 ${esc(t.person)}</span>` : ''}
         ${num(t.ticketCount) ? `<span>${fmtInt(t.ticketCount)} 張</span>` : ''}
-        ${num(t.feeTwd) ? `<span>手續費 ${fmtInt(t.feeTwd)}</span>` : ''}
         ${seat ? `<span>${esc(seat)}</span>` : ''}
+        ${t.kind && t.kind !== '轉賣' ? `<span>${esc(t.kind)}</span>` : ''}
       </div>
-      <div style="margin-top:6px">${num(t.amountTwd)
-        ? (t.settled ? '<span class="badge ok">已收款</span>' : '<span class="badge danger">未收款</span>')
-        : '<span class="badge warn">未填金額</span>'}</div>
+      ${t.person || t.buyerContact ? `<div class="row-meta"><span>買家 ${esc([t.person, t.buyerContact].filter(Boolean).join('｜'))}</span></div>` : ''}
+      ${st === 'deposit' ? `<div class="row-meta"><span>已收 ${fmtInt(got)}／${fmtInt(price)}</span></div>` : ''}
     </div>`;
   }).join('');
   return html;
@@ -2142,8 +2296,9 @@ function transferToLedger(t) {
 function openTransferForm(existing) {
   const isNew = !existing;
   const t = existing ? JSON.parse(JSON.stringify(existing)) : {
-    id: uid(), date: today(), eventId: '', kind: '讓票', person: '', ticketCount: 1, title: '',
-    ticketArea: '', ticketRow: '', ticketSeat: '', costTwd: '', amountTwd: '', feeTwd: '', settled: false, notes: '', createdAt: today(),
+    id: uid(), date: today(), eventId: '', kind: '轉賣', person: '', buyerContact: '', ticketCount: 1, title: '',
+    ticketArea: '', ticketRow: '', ticketSeat: '', costTwd: '', amountTwd: '', feeTwd: '', receivedTwd: '', delivered: false,
+    settled: false, notes: '', createdAt: today(),
   };
   const evOpts = [['', '不指定活動']].concat(
     DB.events.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)))
@@ -2157,8 +2312,8 @@ function openTransferForm(existing) {
   ${fieldHtml('票券／活動名稱', `<input id="t-title" placeholder="直接打字即可，不用在活動清單裡" value="${esc(t.title)}">`)}
   <div class="field"><label>連結活動場次（選填，自己沒要去的票可以不用選）</label>${selectHtml('t-eventId', evOpts, t.eventId)}</div>
   <div class="field-row">
-    ${fieldHtml('讓給誰（對方）', `<input id="t-person" list="dl-cp2" value="${esc(t.person)}">`)}
     ${fieldHtml('張數', `<input id="t-ticketCount" type="number" inputmode="numeric" value="${esc(t.ticketCount)}">`)}
+    ${fieldHtml('我原本花了多少', `<input id="t-costTwd" type="number" inputmode="numeric" value="${esc(t.costTwd)}">`)}
   </div>
   <datalist id="dl-cp2">${datalistOptions(peopleList().concat((DB.transfers || []).map(x => x.person)))}</datalist>
   <div class="field-row">
@@ -2166,13 +2321,19 @@ function openTransferForm(existing) {
     ${fieldHtml('排', `<input id="t-ticketRow" value="${esc(t.ticketRow)}">`)}
     ${fieldHtml('座號', `<input id="t-ticketSeat" value="${esc(t.ticketSeat)}">`)}
   </div>
+  <div class="form-section">買家與進度 <span id="t-stage"></span></div>
   <div class="field-row">
-    ${fieldHtml('我原本花了多少', `<input id="t-costTwd" type="number" inputmode="numeric" value="${esc(t.costTwd)}">`)}
-    ${fieldHtml('對方要付我多少', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
+    ${fieldHtml('買家', `<input id="t-person" list="dl-cp2" placeholder="還沒有就留空" value="${esc(t.person)}">`)}
+    ${fieldHtml('聯絡方式', `<input id="t-buyerContact" placeholder="LINE ID、站內信帳號…" value="${esc(t.buyerContact || '')}">`)}
+  </div>
+  <div class="field-row">
+    ${fieldHtml('成交價', `<input id="t-amountTwd" type="number" inputmode="numeric" value="${esc(t.amountTwd)}">`)}
+    ${fieldHtml('已收', `<input id="t-receivedTwd" type="number" inputmode="numeric" value="${esc(transferReceived(t) || '')}">`)}
     ${fieldHtml('退票手續費', `<input id="t-feeTwd" type="number" inputmode="numeric" value="${esc(t.feeTwd)}">`)}
   </div>
+  <div class="btn-row" style="margin-bottom:10px"><button class="btn line small" id="t-paid">已收全額</button></div>
+  <label class="check-row">已給票 <input type="checkbox" id="t-delivered" ${transferDelivered(t) ? 'checked' : ''}></label>
   <div class="hint" id="t-hint"></div>
-  <label class="check-row">已收款 <input type="checkbox" id="t-settled" ${t.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="t-notes" rows="2">${esc(t.notes)}</textarea>`)}
   <div class="sheet-actions">
     <button class="btn primary" id="transfer-save">儲存紀錄</button>
@@ -2186,28 +2347,29 @@ function openTransferForm(existing) {
     if (ev.startDate) $('#t-date').value = ev.startDate;
     if (!$('#t-title').value.trim()) $('#t-title').value = ev.name;
   };
-  $('#t-costTwd').addEventListener('input', () => {
-    const a = $('#t-amountTwd');
-    if (!a.value.trim()) a.value = $('#t-costTwd').value; // 預設原價讓出，可自行改
-    refreshTHint();
-  });
-  ['t-amountTwd', 't-feeTwd', 't-settled'].forEach(id => $('#' + id).addEventListener('input', refreshTHint));
+  $('#t-costTwd').addEventListener('input', refreshTHint);
+  ['t-amountTwd', 't-feeTwd', 't-receivedTwd', 't-person', 't-delivered', 't-kind'].forEach(id => $('#' + id).addEventListener('input', refreshTHint));
+  $('#t-delivered').addEventListener('change', refreshTHint);
+  $('#t-paid').onclick = () => { $('#t-receivedTwd').value = $('#t-amountTwd').value; refreshTHint(); };
   function refreshTHint() {
-    const got = num($('#t-amountTwd').value), cost = num($('#t-costTwd').value), fee = num($('#t-feeTwd').value);
-    if (!got && !cost) { $('#t-hint').textContent = '「對方要付我多少」沒填的話，未收金額不會被算進去'; return; }
-    const net = got - cost - fee;
-    $('#t-hint').textContent = `${$('#t-settled').checked ? '已收' : '待收'} ${fmtTwd(got)}`
-      + (cost || fee ? `｜和成本相比 ${net >= 0 ? '+' : ''}${fmtInt(net)}` : '');
+    const price = num($('#t-amountTwd').value), got = num($('#t-receivedTwd').value), cost = num($('#t-costTwd').value), fee = num($('#t-feeTwd').value);
+    const draft = { kind: $('#t-kind').value.trim(), person: $('#t-person').value.trim(), amountTwd: price, receivedTwd: got, delivered: $('#t-delivered').checked };
+    $('#t-stage').innerHTML = stageBadge(draft);
+    const parts = [];
+    if (price) parts.push(`還沒收 ${fmtTwd(Math.max(0, price - got))}`);
+    if (price && (cost || fee)) { const net = price - cost - fee; parts.push(`和成本相比 ${net >= 0 ? '+' : ''}${fmtInt(net)}`); }
+    $('#t-hint').textContent = parts.join('｜') || '填買家、成交價、已收、已給票，階段會自動變化';
   }
   refreshTHint();
   $('#transfer-save').onclick = () => {
-    ['date', 'kind', 'person', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
+    ['date', 'kind', 'person', 'buyerContact', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
     t.eventId = $('#t-eventId').value;
-    t.settled = $('#t-settled').checked;
-    ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd'].forEach(k => {
+    t.delivered = $('#t-delivered').checked;
+    ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd', 'receivedTwd'].forEach(k => {
       const v = $('#t-' + k).value;
       t[k] = v === '' ? '' : num(v);
     });
+    t.settled = num(t.amountTwd) > 0 && num(t.receivedTwd) >= num(t.amountTwd); // 相容舊欄位：收齊就算已收款
     saveTransfer(t);
     closeSheet();
     render();
@@ -2834,7 +2996,7 @@ new MutationObserver(muts => muts.forEach(m => m.addedNodes.forEach(n => {
 $$('#tabbar button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
 $('#fab').onclick = () => {
   if (state.tab === 'orders') openOrderForm(null);
-  else if (state.tab === 'events') openEventForm(null);
+  else if (state.tab === 'events') (state.evSeg === 'onsale' ? openOnsaleForm(null) : openEventForm(null));
   else if (state.tab === 'ledger') (state.lgSeg === 'transfer' ? openTransferForm(null) : openLedgerForm(null));
 };
 $('#sync-btn').onclick = () => doSync(false);

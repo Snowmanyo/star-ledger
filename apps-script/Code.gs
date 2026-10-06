@@ -25,7 +25,8 @@ const TABLES = {
   events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt', 'coverUrl', 'startTime'],
   ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt', 'settled', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketPlatform', 'ticketAccount', 'ticketCount', 'splits', 'ticketPickupDate', 'ticketPickedUp', 'ticketOrderNumber', 'ticketPickupMethod'],
   transfers: ['id', 'date', 'eventId', 'kind', 'person', 'ticketCount', 'ticketArea', 'ticketRow', 'ticketSeat', 'costTwd', 'amountTwd', 'settled', 'notes', 'createdAt', 'title', 'feeTwd',
-    'artist', 'eventName', 'startTime', 'venue', 'city', 'faceTwd', 'platform', 'account', 'orderNumber', 'pickupDate', 'pickupMethod', 'pickedUp', 'ticketFeeTwd'],
+    'artist', 'eventName', 'startTime', 'venue', 'city', 'faceTwd', 'platform', 'account', 'orderNumber', 'pickupDate', 'pickupMethod', 'pickedUp', 'ticketFeeTwd',
+    'buyerContact', 'receivedTwd', 'delivered'],
   aliases: ['id', 'field', 'from', 'to', 'createdBy', 'createdAt'], // 習慣記法：讀到 from 一律記成 to
   // 搶票提醒：一波開賣一列；watchers／done 是 LINE 使用者 id 的 JSON 陣列
   onsales: ['id', 'groupId', 'title', 'artist', 'venue', 'city', 'showDates', 'phase', 'saleAt', 'platform', 'price', 'notes',
@@ -333,6 +334,8 @@ const LINE_HELP = [
   '🔎 查詢：用下方選單，或直接問我，例如「11月有什麼場」「DAY6 今年看了幾場」「今年花多少」。',
   '🎫 未來場次：每場會列出座位、誰要去、取票了沒；取完票點下方「已取」標記。只想看還沒取的票可以打「待取票」。',
   '⏰ 提醒設定：打「提醒設定」看目前的時間；打「取票提醒改成 9:30」「轉賣提醒改成週五 21:00」「搶票預告改成 20:00」「搶票提醒改成前 15 分鐘」修改，或「…關掉」。',
+  '🔁 轉賣中：點一筆可以填買家、成交價、已收多少、已給票；階段（待售／洽談中／收訂金／待給票／完成）會自動變化。',
+  '🔔 即將開賣：點一筆可以打字修改或刪除。',
   '🗓 Apple 行事曆：打「行事曆」拿訂閱網址，iPhone 設定 → App → 行事曆 → 行事曆帳號 → 加入帳號 → 其他 → 加入訂閱的行事曆，貼上網址。所有場次和開賣時間會自動出現。',
   '📝 換售資訊：選售票或換票、挑要放的票，就會產生可以直接複製的文章；打「售票備註」「換票備註」看或修改固定備註。',
   '💰 花費：打「本月花費」或直接問「今年花多少」。',
@@ -869,6 +872,7 @@ function onLineText_(token, uid, me, users, text) {
   let s = lineSession_(uid);
   if (/^(取消|cancel)$/i.test(text)) {
     if (tradeSession_(uid)) { clearTradeSession_(uid); return lineReply_(token, '已取消，沒有產生文章。'); }
+    if (editSession_(uid)) { clearEditSession_(uid); return lineReply_(token, '好，結束修改。'); }
     clearLineSession_(uid);
     return lineReply_(token, s && s.d ? '已取消這筆，沒有建檔。' : '目前沒有進行中的紀錄。');
   }
@@ -877,6 +881,8 @@ function onLineText_(token, uid, me, users, text) {
   if (cmd) return lineReply_(token, cmd);
   const trade = tradeSession_(uid);
   if (trade) return onTradeText_(token, uid, trade, text);
+  const ed = editSession_(uid);
+  if (ed) return ed.kind === 'transfer' ? editTransferText_(token, uid, ed, text) : editOnsaleGroupText_(token, uid, ed, text);
   if (!s) {
     if (PROPS.getProperty('ld_' + uid)) {
       PROPS.deleteProperty('ld_' + uid);
@@ -929,6 +935,12 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'ogot' && pb.v.indexOf('miss:') === 0) return onsaleMark_(token, uid, 'omiss', pb.v.slice(5));
   if (['watch', 'unwatch', 'ogot', 'omiss'].indexOf(pb.a) >= 0) return onsaleMark_(token, uid, pb.a, pb.v);
   if (pb.a === 'onotify') return onsaleNotify_(token, uid, me, pb.v);
+  if (pb.a === 'tedit') return openTransferEdit_(token, uid, pb.v);
+  if (pb.a === 'tq') return quickTransfer_(token, uid, pb.v);
+  if (pb.a === 'oedit') return openOnsaleEdit_(token, uid, pb.v);
+  if (pb.a === 'odel') return lineReply_(token, ask_('確定要刪除這個搶票提醒嗎？刪除後不會再提醒。', 'odelok', [[pb.v, '確定刪除'], ['no', '不要']]));
+  if (pb.a === 'odelok') return pb.v === 'no' ? lineReply_(token, '好，沒有刪除。') : deleteOnsaleGroup_(token, uid, pb.v);
+  if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
   if (pb.a === 'trade') return tradePick_(token, uid, pb.v === 'swap' ? 'swap' : 'sell');
   if (pb.a === 'tnote' || pb.a === 'tdeliv' || pb.a === 'tplace' || pb.a === 'tsel' || pb.a === 'tpick') {
     const tr = tradeSession_(uid);
@@ -1406,6 +1418,7 @@ function transferItem_(t, ev) {
     pickupMethod: t.pickupMethod || noteField_(t.notes, /取票：([^｜]+)/),
     platform: t.platform || noteField_(t.notes, /平台：([^｜]+)/), account: t.account || noteField_(t.notes, /帳號：([^｜]+)/),
     picked: String(t.pickedUp) === 'true', sold: String(t.settled) === 'true' || num_(t.amountTwd) > 0,
+    stage: transferStage_(t), buyer: t.person, contact: t.buyerContact, price: num_(t.amountTwd), received: transferReceived_(t),
     payer: noteField_(t.notes, /付款人：([^｜]+)/),
   };
 }
@@ -1503,22 +1516,51 @@ function countText_(q) {
   }), { sub: '最近看過的' + Math.min(12, seen.length) + ' 場' });
 }
 
-function unsoldTransfers_() {
+// 轉賣階段：依買家、成交價、已收、已給票自動判斷（和網站相同）
+const STAGE_ = {
+  sale: { label: '⚪ 待售', color: C_MUTED }, talk: { label: '🟠 洽談中', color: '#C98A4B' }, deposit: { label: '🟡 收訂金', color: '#C98A4B' },
+  deliver: { label: '🔵 待給票', color: '#5F8CA3' }, done: { label: '✅ 完成', color: C_OK }, refund: { label: '退票', color: C_MUTED },
+};
+// 舊資料沒有「已收」「已給票」：勾過已收款的當作完成
+const transferReceived_ = function (t) { return str_(t.receivedTwd) === '' ? (String(t.settled) === 'true' ? num_(t.amountTwd) : 0) : num_(t.receivedTwd); };
+const transferDelivered_ = function (t) { return String(t.delivered) === 'true' || (str_(t.receivedTwd) === '' && String(t.settled) === 'true'); };
+function transferStage_(t) {
+  if (t.kind === '退票') return 'refund';
+  if (transferDelivered_(t)) return 'done';
+  const got = transferReceived_(t), price = num_(t.amountTwd);
+  if (!str_(t.person) && !got) return 'sale';
+  if (got <= 0) return 'talk';
+  if (price && got < price) return 'deposit';
+  return 'deliver';
+}
+// 還在進行中的轉賣（還沒完成、演出還沒過）
+function activeTransfers_() {
   const today = today_();
   return sheetRows_('transfers').filter(function (t) {
-    return String(t.settled) !== 'true' && !num_(t.amountTwd) && String(t.date || '9999') >= today && ['退票', '換票'].indexOf(t.kind) < 0;
+    return ['done', 'refund'].indexOf(transferStage_(t)) < 0 && String(t.date || '9999') >= today && t.kind !== '換票';
   }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
 }
+// 還沒有買家的票（換售資訊從這裡挑）
+function unsoldTransfers_() {
+  return activeTransfers_().filter(function (t) { return transferStage_(t) === 'sale'; });
+}
 function resaleText_(title) {
-  const list = unsoldTransfers_();
-  if (!list.length) return '目前沒有還沒賣出的票 ✦';
+  const list = activeTransfers_();
+  if (!list.length) return '目前沒有進行中的轉賣 ✦';
   const byId = {};
   sheetRows_('events').forEach(function (e) { byId[e.id] = e; });
-  return agendaMessage_(title || '還沒賣出的票', list.map(function (t) {
-    const it = transferItem_(t, byId[t.eventId]);
+  const order = { talk: 0, deposit: 1, deliver: 2, sale: 3 };
+  const items = list.map(function (t) { return transferItem_(t, byId[t.eventId]); })
+    .sort(function (a, b) { return (order[a.stage] - order[b.stage]) || String(a.date).localeCompare(String(b.date)); });
+  return agendaMessage_(title || '轉賣中', items.map(function (it) {
+    const st = STAGE_[it.stage];
     return { date: it.date, time: it.time, top: it.artist, title: it.name,
-      lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, '×' + it.count + ' 張'].filter(Boolean).join('　')), it.face ? '💰 票面 ' + it.face + (it.fee ? '＋系統服務費 ' + it.fee : '') : ''] };
-  }), { sub: '共 ' + list.length + ' 筆', foot: '賣出後到網站「讓票」頁填上對方付的金額，就不會再出現在這裡。' });
+      lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, '×' + it.count + ' 張'].filter(Boolean).join('　')),
+        pre_('👤', [it.buyer, it.contact].filter(Boolean).join('｜')),
+        it.price ? '💰 成交 ' + it.price.toLocaleString('en-US') + (it.stage === 'deposit' ? '｜已收 ' + it.received.toLocaleString('en-US') : '') : (it.face ? '💰 票面 ' + it.face : '')],
+      status: st.label, statusColor: st.color,
+      action: { type: 'postback', label: '更新', data: 'a=tedit&v=' + it.id, displayText: '更新 ' + shortMD_(it.date) + ' ' + (it.artist || it.name) } };
+  }), { sub: '共 ' + list.length + ' 筆｜點一筆可以更新買家和進度', foot: '階段會依買家、成交價、已收、已給票自動變化；網站「總帳 → 讓票」也能改。' });
 }
 
 function calendarText_() {
@@ -1666,7 +1708,7 @@ function pickupReminderMessage_(today) {
     contents: { type: 'carousel', contents: pickupBubbles_(items) } };
 }
 function resaleReminderMessage_() {
-  return unsoldTransfers_().length ? resaleText_('🔔 每週轉賣提醒：還沒賣出的票') : null;
+  return activeTransfers_().length ? resaleText_('🔔 每週轉賣提醒') : null;
 }
 
 function testReminder_() {
@@ -1772,7 +1814,7 @@ function setupRichMenu_() {
   const head = { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') };
   const old = PROPS.getProperty('RICHMENU_ID');
   if (old) UrlFetchApp.fetch('https://api.line.me/v2/bot/richmenu/' + old, { method: 'delete', headers: head, muteHttpExceptions: true });
-  const labels = ['未來場次', '即將開賣', '換售資訊', '轉賣中', '說明'];
+  const labels = ['未來場次', '即將開賣', '轉賣中', '換售資訊', '說明'];
   const menu = {
     size: { width: 2500, height: 843 }, selected: true, name: '追星記票', chatBarText: '選單',
     areas: labels.map(function (label, i) {
@@ -1846,7 +1888,7 @@ function mergeOnsale_(token, uid, s, x) {
   lineReply_(token, ['已合併 ✦', onsaleCard_(s.o)]);
 }
 
-function onsaleCard_(o) {
+function onsaleCard_(o, existingId) {
   const row = function (k, v) {
     return { type: 'box', layout: 'baseline', spacing: 'md', contents: [
       { type: 'text', text: k, size: 'sm', color: '#9C917F', flex: 2 },
@@ -1875,8 +1917,10 @@ function onsaleCard_(o) {
         { type: 'text', text: '要修改直接打字告訴我，例如「全面開賣改成 11/4 12:00 拓元」', size: 'xxs', color: '#9C917F', wrap: true, margin: 'md' },
       ] },
       footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
-        button('建立提醒', 'confirm', 'primary'), button('要修改', 'edit', 'secondary'), button('取消', 'cancel', 'link'),
-      ] },
+        existingId ? { type: 'button', style: 'secondary', height: 'sm', action: { type: 'postback', label: '刪除這個提醒', data: 'a=odel&v=' + existingId, displayText: '刪除這個提醒' } } : button('建立提醒', 'confirm', 'primary'),
+        existingId ? { type: 'button', style: 'link', height: 'sm', action: { type: 'postback', label: '修改完成', data: 'a=xend&v=1', displayText: '修改完成' } } : button('要修改', 'edit', 'secondary'),
+        existingId ? null : button('取消', 'cancel', 'link'),
+      ].filter(Boolean) },
     },
   };
 }
@@ -2034,10 +2078,11 @@ function onsaleListMessage_(uid, q) {
       lines: g.upcoming.map(function (r) { return '🎫 ' + r.phase + '　' + shortMD_(r.saleAt.slice(0, 10)) + ' ' + r.saleAt.slice(11) + (r.platform ? '｜' + r.platform : ''); })
         .concat([g.first.notes ? '⚠ ' + g.first.notes : '']),
       status: mine ? (g.done.indexOf(uid) >= 0 ? '已結束' : '👀 你要搶') : '', statusColor: C_ACCENT,
+      action: { type: 'postback', label: '修改', data: 'a=oedit&v=' + g.id, displayText: '修改 ' + g.first.title.slice(0, 20) },
     };
   });
   const join = list.filter(function (g) { return g.watchers.indexOf(uid) < 0; }).slice(0, 13);
-  return agendaMessage_('即將開賣', entries, { sub: '左邊是最近一波的開賣時間', foot: join.length ? '想一起搶的可以點下方按鈕。' : '',
+  return agendaMessage_('即將開賣', entries, { sub: '左邊是最近一波的開賣時間｜點一筆可以修改或刪除', foot: join.length ? '想一起搶的可以點下方按鈕。' : '',
     step: 'watch', quick: join.map(function (g) { return [g.id, '我也要搶：' + g.first.title]; }) });
 }
 
@@ -2320,4 +2365,163 @@ function tradeFinish_(token, uid, t, extra) {
   }
   clearTradeSession_(uid);
   lineReply_(token, ['以下是' + TRADE_LABEL[t.mode] + '文章，長按就能複製 ✦（打「' + TRADE_LABEL[t.mode] + '備註」可以看或修改固定備註）'].concat(posts));
+}
+
+/* ---------- 在 LINE 修改轉賣進度與搶票提醒（點清單裡的一筆） ---------- */
+const editSession_ = function (uid) { const raw = cache_().get('lx_' + uid); return raw ? JSON.parse(raw) : null; };
+const saveEditSession_ = function (uid, x) { cache_().put('lx_' + uid, JSON.stringify(x), 1800); };
+const clearEditSession_ = function (uid) { cache_().remove('lx_' + uid); };
+
+function transferCard_(t) {
+  const ev = sheetRows_('events').filter(function (e) { return e.id === t.eventId; })[0];
+  const it = transferItem_(t, ev);
+  const st = STAGE_[it.stage];
+  const row = function (k, v) {
+    return { type: 'box', layout: 'baseline', spacing: 'md', contents: [
+      ftext_(k, 'sm', C_MUTED, { flex: 2 }), ftext_(str_(v) || '—', 'sm', C_INK, { flex: 5 })] };
+  };
+  const btn = function (label, op, style) {
+    return { type: 'button', style: style || 'secondary', height: 'sm', color: style === 'primary' ? C_ACCENT : undefined,
+      action: { type: 'postback', label: label, data: 'a=tq&v=' + t.id + '|' + op, displayText: label } };
+  };
+  return {
+    type: 'flex', altText: '轉賣：' + it.name,
+    contents: { type: 'bubble', body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+      ftext_(st.label, 'sm', st.color, { weight: 'bold' }),
+      ftext_(it.name, 'lg', C_INK, { weight: 'bold' }),
+      ftext_([dateW_(it.date) + (it.time ? ' ' + it.time : ''), [it.seat, '×' + it.count + ' 張'].filter(Boolean).join(' ')].join('\n'), 'sm', C_MUTED),
+      { type: 'separator', margin: 'md' },
+      row('買家', it.buyer), row('聯絡方式', it.contact),
+      row('成交價', it.price ? it.price.toLocaleString('en-US') : ''), row('已收', it.received ? it.received.toLocaleString('en-US') : ''),
+      row('已給票', transferDelivered_(t) ? '是' : '還沒'),
+      ftext_('直接打字更新，例如「買家小美 LINE abc123 成交4580 收訂金1000」「又收了2000」', 'xxs', C_MUTED, { margin: 'md' }),
+    ] }, footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+      btn('已收全額', 'paid', 'primary'), btn('已給票', 'given'), btn('還沒賣（清空買家）', 'reset'),
+      { type: 'button', style: 'link', height: 'sm', action: { type: 'postback', label: '修改完成', data: 'a=xend&v=1', displayText: '修改完成' } },
+    ] } },
+  };
+}
+function saveTransferRow_(t) {
+  t.settled = num_(t.amountTwd) > 0 && num_(t.receivedTwd) >= num_(t.amountTwd); // 相容舊欄位：收齊就算已收款
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { setup_(); writeRows_('transfers', [t]); } finally { lock.releaseLock(); }
+}
+const findTransfer_ = function (id) { return sheetRows_('transfers').filter(function (t) { return t.id === id; })[0]; };
+function openTransferEdit_(token, uid, id) {
+  const t = findTransfer_(id);
+  if (!t) return lineReply_(token, '找不到這筆，可能已經被刪除了。');
+  saveEditSession_(uid, { kind: 'transfer', id: id });
+  lineReply_(token, transferCard_(t));
+}
+function replyTransfer_(token, uid, t) {
+  if (transferStage_(t) === 'done') {
+    clearEditSession_(uid);
+    return lineReply_(token, ['完成 ✦ 這筆不會再出現在「轉賣中」。', transferCard_(t)]);
+  }
+  lineReply_(token, transferCard_(t));
+}
+function quickTransfer_(token, uid, v) {
+  const parts = v.split('|');
+  const t = findTransfer_(parts[0]);
+  if (!t) return lineReply_(token, '找不到這筆，可能已經被刪除了。');
+  saveEditSession_(uid, { kind: 'transfer', id: t.id });
+  if (parts[1] === 'paid') {
+    if (!num_(t.amountTwd)) return lineReply_(token, '還沒有成交價，先打字告訴我，例如「成交4580」。');
+    t.receivedTwd = num_(t.amountTwd);
+  } else if (parts[1] === 'given') {
+    t.delivered = true;
+    t.receivedTwd = transferReceived_(t);
+  } else if (parts[1] === 'reset') {
+    t.person = ''; t.buyerContact = ''; t.receivedTwd = ''; t.delivered = false; t.amountTwd = '';
+  }
+  saveTransferRow_(t);
+  replyTransfer_(token, uid, t);
+}
+const TRANSFER_EDIT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    understood: { type: 'BOOLEAN' }, person: { type: 'STRING' }, buyerContact: { type: 'STRING' },
+    amountTwd: { type: 'NUMBER' }, receivedTwd: { type: 'NUMBER' }, delivered: { type: 'BOOLEAN' }, notes: { type: 'STRING' },
+  },
+  required: ['understood'],
+};
+function editTransferText_(token, uid, sess, text) {
+  const t = findTransfer_(sess.id);
+  if (!t) { clearEditSession_(uid); return lineReply_(token, '找不到這筆，可能已經被刪除了。'); }
+  lineLoading_(uid);
+  const view = { person: t.person, buyerContact: t.buyerContact, amountTwd: num_(t.amountTwd), receivedTwd: transferReceived_(t), delivered: transferDelivered_(t), notes: t.notes };
+  const r = gemini_([{ text: [
+    '以下是一筆轉賣票的資料（JSON）：', JSON.stringify(view), '使用者說：「' + text + '」',
+    '請輸出 understood: true，並只包含要修改的欄位。person 是買家名字，buyerContact 是聯絡方式（LINE ID、站內信帳號等），amountTwd 是成交價，',
+    'receivedTwd 是「累計」已收的錢：使用者說「又收了／再收」要加上原本的，說「收了／收訂金」就是新的累計總額；delivered 是已經把票給買家了沒。',
+    '看不懂就只輸出 understood: false。',
+  ].join('\n') }], TRANSFER_EDIT_SCHEMA);
+  if (r.error) return lineReply_(token, r.error);
+  const c = r.data || {};
+  const keys = ['person', 'buyerContact', 'amountTwd', 'receivedTwd', 'delivered', 'notes'].filter(function (k) { return c[k] !== undefined; });
+  if (!c.understood || !keys.length) return lineReply_(token, '看不太懂要改哪裡，可以這樣說：「買家小美 LINE abc123 成交4580 收訂金1000」。');
+  keys.forEach(function (k) { t[k] = typeof c[k] === 'string' ? str_(c[k]) : c[k]; });
+  if (str_(t.receivedTwd) === '') t.receivedTwd = transferReceived_(t);
+  saveTransferRow_(t);
+  replyTransfer_(token, uid, t);
+}
+
+function onsaleFromGroup_(rows) {
+  const f = rows[0];
+  return { title: f.title, artist: f.artist, venue: f.venue, city: f.city, showDates: f.showDates, price: f.price, notes: f.notes,
+    sales: rows.map(function (r) { return { phase: r.phase, saleAt: r.saleAt, platform: r.platform }; }) };
+}
+const groupRows_ = function (gid) {
+  return sheetRows_('onsales').filter(function (r) { return r.groupId === gid; }).sort(function (a, b) { return String(a.saleAt).localeCompare(String(b.saleAt)); });
+};
+function openOnsaleEdit_(token, uid, gid) {
+  const rows = groupRows_(gid);
+  if (!rows.length) return lineReply_(token, '找不到這個搶票提醒，可能已經被刪除了。');
+  saveEditSession_(uid, { kind: 'onsale', id: gid });
+  lineReply_(token, onsaleCard_(onsaleFromGroup_(rows), gid));
+}
+// 依修改後的內容重寫這一組：沿用要搶的人；開賣時間沒變的保留已提醒紀錄
+function rewriteOnsaleGroup_(gid, o) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    setup_();
+    const old = groupRows_(gid);
+    const f = old[0];
+    const rows = o.sales.map(function (sl) {
+      const prev = old.filter(function (r) { return r.saleAt === sl.saleAt && r.phase === sl.phase; })[0];
+      return {
+        id: prev ? prev.id : newId_(), groupId: gid, title: o.title, artist: o.artist, venue: o.venue, city: o.city, showDates: o.showDates,
+        phase: sl.phase, saleAt: sl.saleAt, platform: sl.platform, price: o.price, notes: o.notes,
+        watchers: f.watchers, done: f.done, sentEve: prev ? prev.sentEve : '', sentLead: prev ? prev.sentLead : '',
+        createdBy: f.createdBy, createdAt: f.createdAt,
+      };
+    });
+    const removed = old.filter(function (r) { return !rows.some(function (x) { return x.id === r.id; }); }).map(function (r) { return r.id; });
+    if (removed.length) deleteRows_('onsales', removed);
+    writeRows_('onsales', rows);
+  } finally {
+    lock.releaseLock();
+  }
+}
+function editOnsaleGroupText_(token, uid, sess, text) {
+  const rows = groupRows_(sess.id);
+  if (!rows.length) { clearEditSession_(uid); return lineReply_(token, '找不到這個搶票提醒，可能已經被刪除了。'); }
+  lineLoading_(uid);
+  const o = onsaleFromGroup_(rows);
+  const r = editOnsale_(o, text);
+  if (r.error) return lineReply_(token, r.error);
+  if (!r.changed) return lineReply_(token, '看不太懂要改哪裡，可以說得更具體一點，例如「全面開賣改成 11/4 12:00 拓元」。');
+  if (!o.sales.length) return lineReply_(token, '至少要留一波開賣時間；要整個刪掉請按「刪除這個提醒」。');
+  rewriteOnsaleGroup_(sess.id, o);
+  lineReply_(token, ['已修改 ✦', onsaleCard_(o, sess.id)]);
+}
+function deleteOnsaleGroup_(token, uid, gid) {
+  const rows = groupRows_(gid);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { setup_(); deleteRows_('onsales', rows.map(function (r) { return r.id; })); } finally { lock.releaseLock(); }
+  clearEditSession_(uid);
+  lineReply_(token, '已刪除搶票提醒' + (rows[0] ? '「' + rows[0].title + '」' : '') + '。');
 }

@@ -3225,3 +3225,22 @@ function authorizeDrive() {
   ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, ['https://www.googleapis.com/auth/drive']);
   Logger.log(backupText_());
 }
+
+// 檢查工具：在編輯器選 testGeminiSearch →「執行」，看哪個模型能在免費方案用 Google 搜尋
+function testGeminiSearch() {
+  const apiKey = PROPS.getProperty('GEMINI_API_KEY');
+  ['gemini-2.5-flash', 'gemini-2.5-flash-lite', GEMINI_MODELS[0]].forEach(function (m) {
+    const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent', {
+      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': apiKey }, muteHttpExceptions: true,
+      payload: JSON.stringify({ contents: [{ parts: [{ text: 'DAY6 2026 台北演唱會 售票頁網址' }] }], tools: [{ google_search: {} }] }),
+    });
+    const code = res.getResponseCode();
+    let note = '';
+    if (code === 200) {
+      const c = (JSON.parse(res.getContentText()).candidates || [])[0] || {};
+      const chunks = (c.groundingMetadata && c.groundingMetadata.groundingChunks) || [];
+      note = '搜尋來源 ' + chunks.length + ' 個：' + chunks.slice(0, 3).map(function (x) { return x.web && x.web.title; }).join('、');
+    } else note = res.getContentText().slice(0, 200);
+    Logger.log(m + ' → ' + code + ' ' + note);
+  });
+}

@@ -1876,15 +1876,18 @@ function setupRichMenu_() {
   const head = { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') };
   const old = PROPS.getProperty('RICHMENU_ID');
   if (old) UrlFetchApp.fetch('https://api.line.me/v2/bot/richmenu/' + old, { method: 'delete', headers: head, muteHttpExceptions: true });
-  const labels = ['上傳截圖', '未來場次', '即將開賣', '轉賣中', '換售資訊', '說明'];
+  // 高選單：左邊大格上傳截圖，右上 2 格、右下 3 格
+  const cells = [
+    ['上傳截圖', 0, 0, 833, 1686], ['未來場次', 833, 0, 834, 843], ['即將開賣', 1667, 0, 833, 843],
+    ['轉賣中', 833, 843, 556, 843], ['換售資訊', 1389, 843, 555, 843], ['說明', 1944, 843, 556, 843],
+  ];
   const menu = {
-    size: { width: 2500, height: 843 }, selected: true, name: '追星記票', chatBarText: '選單',
-    areas: labels.map(function (label, i) {
-      const x = Math.round(i * 2500 / labels.length);
-      const b = { x: x, y: 0, width: Math.round((i + 1) * 2500 / labels.length) - x, height: 843 }; // 一排 6 格
+    size: { width: 2500, height: 1686 }, selected: true, name: '追星記票', chatBarText: '選單',
+    areas: cells.map(function (c) {
+      const b = { x: c[1], y: c[2], width: c[3], height: c[4] };
       // 上傳截圖：用 LINE 的網址直接開相簿（可多選），不用先回訊息
-      if (label === '上傳截圖') return { bounds: b, action: { type: 'uri', label: label, uri: 'https://line.me/R/nv/cameraRoll/multi' } };
-      return { bounds: b, action: { type: 'message', text: label } };
+      if (c[0] === '上傳截圖') return { bounds: b, action: { type: 'uri', label: c[0], uri: 'https://line.me/R/nv/cameraRoll/multi' } };
+      return { bounds: b, action: { type: 'message', text: c[0] } };
     }),
   };
   const res = lineApi_('https://api.line.me/v2/bot/richmenu', menu);

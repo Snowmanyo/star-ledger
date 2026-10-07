@@ -354,7 +354,7 @@ const AI_FIELDS = ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'even
   'ticketCount', 'currency', 'unitFace', 'unitBenefit', 'unitFee', 'totalPaid', 'orderNumber', 'pickupDate', 'pickupMethod',
   'platform', 'account', 'payMethod', 'payDetail'];
 const LINE_HELP = [
-  '📤 上傳截圖：按選單「上傳截圖」→［從相簿選］就能挑圖片；也可以照舊用輸入框旁的＋傳圖。',
+  '📤 上傳截圖：按選單「上傳截圖」會直接打開相簿，可以一次選好幾張；也可以照舊用輸入框旁的＋傳圖。',
   '📸 記票：傳購票截圖給我（同一筆訂單可一次傳 2～3 張）→ 回答幾個問題 → 確認卡片按「確認建檔」。隨時輸入「取消」可以放棄目前這筆。',
   '🛍 周邊：傳周邊訂單截圖給我（品項多可以分幾張一起傳）→ 選品項歸屬、付款 → 確認建檔，會寫進網站「訂單」。打「待到貨」看還沒到的周邊，點一個品項可以標記到貨。',
   '🎫 搶票：傳主辦單位的售票公告截圖給我，確認後會在開賣前一天晚上和開賣前 30 分鐘提醒要搶的人。',
@@ -1882,6 +1882,8 @@ function setupRichMenu_() {
     areas: labels.map(function (label, i) {
       const x = Math.round(i * 2500 / labels.length);
       const b = { x: x, y: 0, width: Math.round((i + 1) * 2500 / labels.length) - x, height: 843 }; // 一排 6 格
+      // 上傳截圖：用 LINE 的網址直接開相簿（可多選），不用先回訊息
+      if (label === '上傳截圖') return { bounds: b, action: { type: 'uri', label: label, uri: 'https://line.me/R/nv/cameraRoll/multi' } };
       return { bounds: b, action: { type: 'message', text: label } };
     }),
   };

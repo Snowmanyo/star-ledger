@@ -109,6 +109,18 @@ function replaceAll_(data) {
   });
 }
 
+// Google 系統的錯誤訊息語言會跟著帳號或試算表設定（可能是日文、英文），常見的先翻成白話中文
+function friendlyError_(err) {
+  const raw = String((err && err.message) || err || '');
+  if (/権限|permission|authoriz|授權|權限|許可/i.test(raw)) return '程式還沒有被允許使用這項 Google 服務（例如雲端硬碟），需要帳號主人重新授權一次。';
+  if (/timed? ?out|タイムアウト|逾時|超時|maximum execution time/i.test(raw)) return '執行太久被 Google 中斷了，請再試一次。';
+  if (/too many times|quota|上限|回数/i.test(raw)) return 'Google 今天的使用次數到上限了，明天再試。';
+  if (/lock|ロック/i.test(raw)) return '剛好有其他人同時在寫入，請等幾秒再試一次。';
+  if (/Address unavailable|DNS|接続|connection/i.test(raw)) return '網路連線失敗，請再試一次。';
+  if (/^[\u4e00-\u9fff]/.test(raw) && !/[\u3040-\u30ff]/.test(raw)) return raw; // 程式自己寫的中文訊息照原樣
+  return '發生錯誤（' + raw.slice(0, 150) + '）';
+}
+
 function uploadImage_(req) {
   const it = DriveApp.getFoldersByName('追星總帳封面');
   const folder = it.hasNext() ? it.next() : DriveApp.createFolder('追星總帳封面');
@@ -322,7 +334,7 @@ function doPost(e) {
     try {
       return json_(scanTicket_(req));
     } catch (err) {
-      return json_({ error: '讀圖時發生錯誤：' + String(err.message || err) });
+      return json_({ error: '讀圖時' + friendlyError_(err) });
     }
   }
   const lock = LockService.getScriptLock();
@@ -332,7 +344,9 @@ function doPost(e) {
     if (req.action === 'upsert') writeRows_(req.table, req.rows);
     else if (req.action === 'delete') deleteRows_(req.table, req.ids);
     else if (req.action === 'replaceAll') replaceAll_(req.data);
-    else if (req.action === 'uploadImage') return json_(uploadImage_(req));
+    else if (req.action === 'uploadImage') {
+      try { return json_(uploadImage_(req)); } catch (err) { return json_({ error: friendlyError_(err) }); }
+    }
     else return json_({ error: 'unknown action' });
     return json_({ ok: true });
   } finally {
@@ -435,7 +449,7 @@ function lineWebhook_(e) {
     try {
       handleLineEvent_(ev);
     } catch (err) {
-      if (ev.replyToken) lineReply_(ev.replyToken, '出了點問題：' + String(err.message || err) + '\n可以再試一次，或改用網站掃票。');
+      if (ev.replyToken) lineReply_(ev.replyToken, '出了點問題：' + friendlyError_(err) + '\n可以再試一次，或改用網站。');
     }
   });
   return json_({ ok: true });
@@ -531,7 +545,7 @@ function readLineImages_(ids) {
   try {
     images = ids.map(lineImage_);
   } catch (err) {
-    return { error: String(err.message || err) };
+    return { error: friendlyError_(err) };
   }
   return readTicketImages_(images);
 }
@@ -3202,6 +3216,6 @@ function backupText_() {
     const at = backupNow_();
     return '已備份 ✦ ' + at + '\n放在雲端硬碟「' + BACKUP_FOLDER_ + '」資料夾，只保留最近 ' + BACKUP_KEEP_ + ' 份。\n之後每週日凌晨 3 點會自動備份。';
   } catch (err) {
-    return '備份失敗：' + String(err.message || err) + '\n上一次成功備份：' + (PROPS.getProperty('LAST_BACKUP') || '還沒有');
+    return '備份失敗：' + friendlyError_(err) + '\n上一次成功備份：' + (PROPS.getProperty('LAST_BACKUP') || '還沒有');
   }
 }

@@ -256,17 +256,21 @@ function gemini_(parts, schema) {
   const apiKey = PROPS.getProperty('GEMINI_API_KEY');
   if (!apiKey) return { error: '還沒設定 Gemini 金鑰：請到 Apps Script「專案設定 → 指令碼屬性」新增 GEMINI_API_KEY' };
   // 讀票不需要深度思考；思考太久會讓手機瀏覽器等超過 60 秒而斷線
-  const config = { responseMimeType: 'application/json', responseSchema: schema, temperature: 0, thinkingConfig: { thinkingLevel: 'low' } };
+  // 不設 temperature：Gemini 3 低於預設值容易重複輸出停不下來；maxOutputTokens 避免鬼打牆時一直等
+  const config = { responseMimeType: 'application/json', responseSchema: schema, maxOutputTokens: 6000, thinkingConfig: { thinkingLevel: 'low' } };
   const call = function (model, cfg) {
     return UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent', {
       method: 'post', contentType: 'application/json', payload: JSON.stringify({ contents: [{ parts: parts }], generationConfig: cfg }),
       headers: { 'x-goog-api-key': apiKey }, muteHttpExceptions: true,
     });
   };
+  const t0 = Date.now();
   let lastCode = 0;
   let lastMsg = '';
   for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    if (i > 0 && Date.now() - t0 > 45000) { lastCode = -2; break; } // 已經等太久，不再換模型（LINE 回覆有時限）
     let res;
+    const t1 = Date.now();
     try {
       res = call(GEMINI_MODELS[i], config);
       if (res.getResponseCode() === 400) { // 模型不支援 thinkingConfig 時，拿掉再試一次
@@ -277,22 +281,31 @@ function gemini_(parts, schema) {
     } catch (err) {
       lastCode = -1;
       lastMsg = String(err.message || err);
+      console.log('gemini ' + GEMINI_MODELS[i] + ' 連線失敗 ' + (Date.now() - t1) + 'ms ' + lastMsg);
       continue; // 逾時或連線失敗，換下一個模型
     }
     lastCode = res.getResponseCode();
     if (lastCode !== 200) lastMsg = res.getContentText().slice(0, 300);
     if (lastCode === 200) {
       const out = JSON.parse(res.getContentText());
-      const cand = (out.candidates || [])[0];
-      const text = cand && cand.content ? cand.content.parts.filter(function (p) { return p.text && !p.thought; })
+      const cand = (out.candidates || [])[0] || {};
+      const text = cand.content && cand.content.parts ? cand.content.parts.filter(function (p) { return p.text && !p.thought; })
         .map(function (p) { return p.text; }).join('') : '';
-      if (!text) return { error: 'AI 沒有讀出內容，請換一張清楚的截圖或手動填寫' };
-      return { ok: true, model: GEMINI_MODELS[i], data: JSON.parse(text) };
+      console.log('gemini ' + GEMINI_MODELS[i] + ' ' + (Date.now() - t1) + 'ms 結束原因 ' + cand.finishReason + ' 長度 ' + text.length
+        + ' tokens ' + JSON.stringify(out.usageMetadata || {}));
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (err) { data = null; }
+      if (data) return { ok: true, model: GEMINI_MODELS[i], data: data };
+      lastCode = -3; // 輸出被截斷或格式壞掉（常見於 AI 重複輸出停不下來）→ 換下一個模型
+      lastMsg = String(cand.finishReason || '沒有內容');
+      continue;
     }
+    console.log('gemini ' + GEMINI_MODELS[i] + ' 代碼 ' + lastCode + ' ' + (Date.now() - t1) + 'ms');
     if (lastCode === 401 || lastCode === 403) break; // 金鑰有問題，換模型也沒用
   }
   if (lastCode === 429) return { error: '今天的 AI 免費次數用完了，可以明天再試，或先手動填寫' };
   if (lastCode === 401 || lastCode === 403) return { error: 'Gemini 金鑰無效或沒有權限（代碼 ' + lastCode + '），請確認指令碼屬性 GEMINI_API_KEY' };
+  if (lastCode === -2 || lastCode === -3) return { error: 'AI 這次讀不出來（讀太久或內容亂掉）。可以再傳一次，或把截圖裁小一點、一次只傳一筆訂單。' };
   return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '）：' + lastMsg };
 }
 
@@ -415,10 +428,16 @@ function lineApi_(url, payload) {
     headers: { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') }, muteHttpExceptions: true,
   });
 }
+let CURRENT_UID_ = '';
 function lineReply_(token, messages) {
   messages = (Array.isArray(messages) ? messages : [messages]).filter(Boolean).slice(0, 5)
     .map(function (m) { return typeof m === 'string' ? { type: 'text', text: m } : m; });
-  lineApi_('https://api.line.me/v2/bot/message/reply', { replyToken: token, messages: messages });
+  const res = lineApi_('https://api.line.me/v2/bot/message/reply', { replyToken: token, messages: messages });
+  // 讀圖太久時回覆權杖可能過期 → 改用推播送出，免得使用者以為卡住
+  if (res && res.getResponseCode && res.getResponseCode() !== 200 && CURRENT_UID_) {
+    console.log('回覆失敗 ' + res.getResponseCode() + '，改用推播');
+    linePush_([CURRENT_UID_], messages);
+  }
 }
 function lineLoading_(uid) {
   lineApi_('https://api.line.me/v2/bot/chat/loading/start', { chatId: uid, loadingSeconds: 30 });
@@ -459,6 +478,7 @@ function lineWebhook_(e) {
 function handleLineEvent_(ev) {
   const uid = ev.source && ev.source.userId;
   if (!uid || ev.source.type !== 'user') return;
+  CURRENT_UID_ = uid;
   const users = lineUsers_();
   const me = users[uid];
   if (me) me.uid = uid;

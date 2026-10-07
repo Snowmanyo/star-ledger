@@ -557,13 +557,18 @@ function renderOrdersTab(view) {
   const segs = [['list', '訂單'], ['arrivals', '待到貨'], ['proxy', '代購'], ['sales', '販售']];
   let html = '<div class="seg">' + segs.map(([k, l]) =>
     `<button data-seg="${k}" class="${state.seg === k ? 'on' : ''}">${l}</button>`).join('') + '</div>';
-  if (state.seg === 'list') html += ordersListHtml();
+  if (state.seg === 'list') html += `<button class="btn line" id="order-scan" style="width:100%;margin-bottom:12px">📸 上傳周邊訂單截圖</button>
+    <input type="file" id="order-scan-file" accept="image/*" multiple style="display:none">` + ordersListHtml();
   else if (state.seg === 'arrivals') html += arrivalsHtml();
   else if (state.seg === 'sales') html += salesHtml();
   else html += proxyHtml();
   view.innerHTML = html;
   $$('[data-seg]', view).forEach(b => b.onclick = () => { state.seg = b.dataset.seg; state.openGroups = {}; render(); });
-  if (state.seg === 'list') bindOrdersList(view);
+  if (state.seg === 'list') {
+    bindOrdersList(view);
+    $('#order-scan', view).onclick = () => $('#order-scan-file', view).click();
+    $('#order-scan-file', view).onchange = e => { const files = Array.from(e.target.files || []); e.target.value = ''; startScan(files); };
+  }
   else if (state.seg === 'arrivals') bindArrivals(view);
   else if (state.seg === 'sales') bindSales(view);
   else bindProxy(view);
@@ -1610,9 +1615,36 @@ function datalistOptions(values) {
   return [...new Set(values.filter(Boolean))].map(v => `<option value="${esc(v)}">`).join('');
 }
 
-function openOrderForm(existing) {
+// 周邊訂單截圖 → 新訂單草稿（品項歸屬先填「待補」，在表單上選）
+function merchOrderFromScan(d, duplicate) {
+  const str = v => String(v == null ? '' : v).trim();
+  const norm = v => str(v).toLowerCase().replace(/\s/g, '');
+  const cur = str(d.currency).toUpperCase();
+  const currency = CURRENCIES.includes(cur) ? cur : 'TWD';
+  const channel = DB.orders.map(o => o.channel).find(c => c && norm(c) === norm(d.channel)) || str(d.channel);
+  const shipFrom = /^\d{4}-\d{2}-\d{2}$/.test(str(d.shipFrom)) ? str(d.shipFrom) : '';
+  const shipText = str(d.shipText);
+  const notes = [];
+  if (shipText && shipText.replace(/\D/g, '') !== shipFrom.replace(/\D/g, '')) notes.push('預計出貨：' + shipText);
+  if (currency !== 'TWD') notes.push('國際運費尚未確認');
+  const items = (Array.isArray(d.items) ? d.items : []).filter(it => str(it.name)).map(it => ({
+    id: uid(), name: str(it.name), variant: str(it.variant), unitPrice: num(it.unitPrice), quantity: num(it.quantity) || 1,
+    ownership: 'pending', proxyFor: '', arrived: false, sorted: false, proxyPaid: false, salePriceTwd: '', soldQuantity: 0,
+  }));
+  return {
+    id: uid(), orderNumber: str(d.orderNumber), channel, orderDate: str(d.orderDate) || today(), estimatedShipDate: shipFrom, actualShipDate: '',
+    currency, domesticShipping: num(d.domesticShipping) || '', internationalShippingTwd: currency === 'TWD' ? '' : 0, internationalShippingRateTwdPerKg: '',
+    discountAmount: Math.abs(num(d.discountAmount)) || '', weightGrams: '', exchangeRate: '', chargedTwd: '', payer: CFG.myName || '',
+    paymentMethod: SCAN_PAY.some(([v]) => v === str(d.payMethod)) ? str(d.payMethod) : '', paymentDetail: str(d.payDetail),
+    settled: false, notes: notes.join('\n'), items,
+    scanned: { duplicate: duplicate || null, screenTotal: num(d.totalPaid) },
+  };
+}
+function openOrderForm(existing, draft) {
   const isNew = !existing;
-  const o = existing ? JSON.parse(JSON.stringify(existing)) : {
+  const scanned = draft && draft.scanned;
+  if (draft) delete draft.scanned;
+  const o = existing ? JSON.parse(JSON.stringify(existing)) : draft || {
     id: uid(), orderNumber: '', channel: '', orderDate: today(), estimatedShipDate: '', actualShipDate: '',
     currency: 'KRW', domesticShipping: '', internationalShippingTwd: '', internationalShippingRateTwdPerKg: '',
     discountAmount: '', weightGrams: '', exchangeRate: '', chargedTwd: '', payer: '', paymentMethod: '',
@@ -1655,7 +1687,13 @@ function openOrderForm(existing) {
   const payOpts = [['', '—'], ['cash', '現金'], ['credit_card', '信用卡'], ['bank_transfer', '轉帳'], ['mobile_payment', '行動支付']];
   const curOpts = CURRENCIES.map(c => [c, c]);
   const html = `
-  ${sheetTitleHtml(isNew ? '新增訂單' : '編輯訂單', !isNew, 'order-del')}
+  ${sheetTitleHtml(scanned ? '掃到周邊訂單' : isNew ? '新增訂單' : '編輯訂單', !isNew, 'order-del')}
+  ${scanned ? `<div class="scan-status ok">AI 讀到的內容，檢查品項與歸屬後按「儲存訂單」</div>
+    ${scanned.duplicate ? `<div class="scan-status err">⚠ 這個訂單編號好像已經記過了（${esc(scanned.duplicate.title)}${scanned.duplicate.date ? '・' + esc(scanned.duplicate.date) : ''}）</div>` : ''}
+    <div class="form-section">整筆歸屬</div>
+    <div class="scan-chips">${[['self', '全部自留'], ['proxy', '全部代購'], ['stock', '全部現貨'], ['pending', '先不確定']]
+      .map(([v, l]) => `<button class="chip" data-own-all="${v}">${l}</button>`).join('')}</div>
+    <div class="field" id="own-all-proxy" style="display:none"><label>代購對象（全部）</label><input id="f-own-all-proxy" list="dl-proxy" placeholder="例：Jhen"></div>` : ''}
   <datalist id="dl-channel">${datalistOptions(DB.orders.map(x => x.channel))}</datalist>
   <datalist id="dl-payer">${datalistOptions(DB.orders.map(x => x.payer).concat(DB.ledger.map(x => x.payer)))}</datalist>
   <datalist id="dl-proxy">${datalistOptions(DB.orders.flatMap(x => (x.items || []).map(it => it.proxyFor)))}</datalist>
@@ -1778,6 +1816,33 @@ function openOrderForm(existing) {
   rebindItems();
   refreshTotals();
   sheet.oninput = refreshTotals;
+  const scanCheck = () => {
+    if (!scanned || !scanned.screenTotal) return;
+    const diff = Math.abs(scanned.screenTotal - orderTotal(o)) > 0.5;
+    let el = $('#scan-total-warn');
+    if (!el) { el = document.createElement('div'); el.id = 'scan-total-warn'; el.className = 'hint'; $('#total-box').after(el); }
+    el.style.color = 'var(--danger)';
+    el.textContent = diff ? `⚠ 截圖上的總額是 ${fmtMoney(o.currency, scanned.screenTotal)}，和品項加總不一樣，請檢查品項、運費或折抵。` : '';
+  };
+  if (scanned) {
+    scanCheck();
+    sheet.addEventListener('input', scanCheck);
+    $$('[data-own-all]', sheet).forEach(b => b.onclick = () => {
+      readItems();
+      const v = b.dataset.ownAll;
+      $$('[data-own-all]', sheet).forEach(x => x.classList.toggle('on', x === b));
+      $('#own-all-proxy').style.display = v === 'proxy' ? '' : 'none';
+      o.items.forEach(it => { it.ownership = v; if (v === 'proxy') it.proxyFor = $('#f-own-all-proxy').value.trim(); });
+      $('#items-wrap').innerHTML = o.items.map(itemBlock).join('');
+      rebindItems();
+      refreshTotals();
+    });
+    $('#f-own-all-proxy').oninput = e => {
+      readItems();
+      o.items.forEach(it => { if (it.ownership === 'proxy') it.proxyFor = e.target.value.trim(); });
+      $$('#items-wrap [data-k="proxyFor"]').forEach(inp => { if (o.items[inp.dataset.i].ownership === 'proxy') inp.value = e.target.value.trim(); });
+    };
+  }
 
   $('#add-item').onclick = () => {
     readItems();
@@ -2531,6 +2596,13 @@ async function startScan(files) {
     });
     scanTestQuota = false;
     if (res.data && res.data.docType === 'onsale') throw new Error('這張看起來是售票公告，不是購票訂單。搶票提醒請把截圖傳給 LINE 機器人建立。');
+    if (res.data && res.data.docType === 'merch') {
+      if (scan !== s) return;
+      scan = null;
+      closeSheet();
+      openOrderForm(null, merchOrderFromScan(res.data, res.duplicate));
+      return;
+    }
     s.model = res.model || '';
     s.duplicate = res.duplicate || null;
     await applyScanResult(s, res.data || {});
@@ -2590,7 +2662,7 @@ async function applyScanResult(s, d) {
 }
 
 function openScanSheet() {
-  openSheet(`${sheetTitleHtml('掃票', false)}<div id="scan-body"></div>`);
+  openSheet(`${sheetTitleHtml('讀取截圖', false)}<div id="scan-body"></div>`);
   $('#sh-close').onclick = () => { closeSheet(); render(); };
   const body = $('#scan-body');
   body.addEventListener('input', e => {
@@ -2702,7 +2774,7 @@ function renderScanBody() {
   const ready = s.status === 'done' || s.status === 'manual';
 
   const statusHtml = s.status === 'reading'
-    ? `<div class="scan-status"><span class="scan-spin"></span>AI 讀取中…先回答下面的問題吧</div>`
+    ? `<div class="scan-status"><span class="scan-spin"></span>AI 讀取中…購票的話可以先回答下面的問題</div>`
     : s.status === 'error'
       ? `<div class="scan-status err">${esc(s.error)}</div>
          <button class="btn line" id="scan-manual">改成手動填寫</button>`
@@ -2914,9 +2986,9 @@ async function commitScan(existingEvent) {
 function scanHeroHtml() {
   const d = scanDraft();
   return `<div class="scan-hero" id="scan-drop">
-    <div class="scan-eyebrow">TICKET SCAN</div>
-    <div class="scan-title">上傳購票截圖</div>
-    <div class="scan-sub">AI 會讀出場次、日期、座位與票價</div>
+    <div class="scan-eyebrow">SCAN</div>
+    <div class="scan-title">上傳截圖</div>
+    <div class="scan-sub">購票訂單、周邊訂單都可以，AI 會自動判斷</div>
     <button class="btn primary scan-btn" id="scan-pick">選擇截圖</button>
     <div class="scan-sub scan-desktop">也可以把截圖拖進來，或直接貼上（⌘V）</div>
     <input type="file" id="scan-file" accept="image/*" multiple style="display:none">

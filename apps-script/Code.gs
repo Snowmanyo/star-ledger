@@ -139,10 +139,14 @@ const SCAN_PROMPT = [
   '- pickupDate 是可取票日期（YYYY-MM-DD）；如果只寫「演出前 N 天可取票」，pickupDate 填空字串、pickupDaysBefore 填 N。',
   '- payMethod 是付款方式，用 credit_card、bank_transfer、mobile_payment、cash 其中之一；payDetail 是卡別或支付平台名稱（例如 永豐、LINE Pay）。看不出來填空字串。',
   '- uncertain 列出你沒把握的欄位名稱。',
-  '- docType：已經買好的訂單或票券填 order；主辦單位的售票公告（還沒買，列出開賣時間）填 onsale。',
+  '- docType：已經買好的演出門票訂單或票券填 order；主辦單位的售票公告（還沒買，列出開賣時間）填 onsale；周邊商品（專輯、應援物、寫真、週邊等）的購物訂單填 merch。',
   '- 如果是 onsale：eventName、artist、venue、city 照上面規則填；showDates 列出所有演出場次（YYYY-MM-DD HH:MM，沒有時間就 YYYY-MM-DD）；',
   '  sales 每一波開賣一筆：phase（例如會員預售、全面開賣、抽選登記）、saleAt（YYYY-MM-DD HH:MM，24 小時制）、platform（同上面的平台寫法）；',
   '  priceInfo 是票價摘要（例如 5880/4880/3880）；notice 是注意事項（例如實名制、每人限購 4 張）。訂單相關欄位留空或 0。',
+  '- 如果是 merch：channel 是購買的商城或通路（例如 Weverse Shop、Ktown4u、JYP JAPAN）；orderNumber 訂單編號；orderDate 訂購日期 YYYY-MM-DD；currency 幣別；',
+  '  items 每個商品一筆：name 品名、variant 版本／成員／規格（沒有就空字串）、unitPrice 單價、quantity 數量；運費、手續費、折扣都不要當成品項；',
+  '  domesticShipping 是訂單上的運費，discountAmount 是折抵（點數、優惠券、購物金，填正數）；totalPaid 是訂單實際付款總額；',
+  '  shipFrom 是預計出貨的開始日期 YYYY-MM-DD，shipText 是預計出貨的原文（例如 7/2～7/9 依序出貨），沒寫就空字串；payMethod、payDetail 同上。票券相關欄位留空或 0。',
 ].join('\n');
 
 const SCAN_SCHEMA = {
@@ -162,6 +166,10 @@ const SCAN_SCHEMA = {
     sales: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
       phase: { type: 'STRING' }, saleAt: { type: 'STRING' }, platform: { type: 'STRING' } } } },
     priceInfo: { type: 'STRING' }, notice: { type: 'STRING' },
+    channel: { type: 'STRING' }, orderDate: { type: 'STRING' }, shipFrom: { type: 'STRING' }, shipText: { type: 'STRING' },
+    domesticShipping: { type: 'NUMBER' }, discountAmount: { type: 'NUMBER' },
+    items: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      name: { type: 'STRING' }, variant: { type: 'STRING' }, unitPrice: { type: 'NUMBER' }, quantity: { type: 'NUMBER' } } } },
     uncertain: { type: 'ARRAY', items: { type: 'STRING' } },
   },
   required: ['eventName', 'date', 'seats', 'currency', 'totalPaid', 'ticketCount'],
@@ -180,7 +188,10 @@ function readTicketImages_(images) {
     parts.push({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.dataBase64 } });
   });
   const r = gemini_(parts, SCAN_SCHEMA);
-  if (r.ok) {
+  if (r.ok && r.data.docType === 'merch') {
+    r.data.channel = merchChannel_(r.data.channel);
+    r.duplicate = findMerchOrder_(r.data.orderNumber);
+  } else if (r.ok) {
     r.data.eventName = cleanEventName_(r.data.eventName, r.data.artist);
     applyAliases_(r.data);
     r.duplicate = findOrder_(r.data.orderNumber);
@@ -210,9 +221,9 @@ function knownNamesText_() {
     events.forEach(function (e) { const v = String(e[key] || '').trim(); if (v && out.indexOf(v) < 0 && out.length < 40) out.push(v); });
     return out.join('、');
   };
-  const venues = pick('venue'), artists = pick('artist');
-  if (!venues && !artists) return '';
-  return '\n- 以下是使用者習慣的寫法，讀到同一個場館或表演者時請沿用這些寫法：\n  場館：' + venues + '\n  表演者：' + artists;
+  const venues = pick('venue'), artists = pick('artist'), channels = knownChannels_().join('、');
+  if (!venues && !artists && !channels) return '';
+  return '\n- 以下是使用者習慣的寫法，讀到同一個場館、表演者或通路時請沿用這些寫法：\n  場館：' + venues + '\n  表演者：' + artists + '\n  周邊通路：' + channels;
 }
 function applyAliases_(data) {
   sheetRows_('aliases').forEach(function (a) {
@@ -344,6 +355,7 @@ const AI_FIELDS = ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'even
   'platform', 'account', 'payMethod', 'payDetail'];
 const LINE_HELP = [
   '📸 記票：傳購票截圖給我（同一筆訂單可一次傳 2～3 張）→ 回答幾個問題 → 確認卡片按「確認建檔」。隨時輸入「取消」可以放棄目前這筆。',
+  '🛍 周邊：傳周邊訂單截圖給我（品項多可以分幾張一起傳）→ 選品項歸屬、付款 → 確認建檔，會寫進網站「訂單」。打「待到貨」看還沒到的周邊，點一個品項可以標記到貨。',
   '🎫 搶票：傳主辦單位的售票公告截圖給我，確認後會在開賣前一天晚上和開賣前 30 分鐘提醒要搶的人。',
   '🔎 查詢：用下方選單，或直接問我，例如「11月有什麼場」「DAY6 今年看了幾場」「今年花多少」。',
   '🎫 未來場次：每場會列出座位、誰要去、取票了沒；取完票點下方「已取」標記。只想看還沒取的票可以打「待取票」。',
@@ -486,7 +498,7 @@ function onLineImage_(ev, uid, me) {
   try {
     s = lineSession_(uid) || {};
     if (s.step === 'name') s = {};
-    const target = s.d || s.o ? 'pending' : 'imgs'; // 已經在問答中 → 當作補傳
+    const target = s.d || s.o || s.m ? 'pending' : 'imgs'; // 已經在問答中 → 當作補傳
     const set = ev.message.imageSet;
     if (set) {
       if (!s.set || s.set.id !== set.id) s.set = { id: set.id, total: set.total, items: [] };
@@ -507,7 +519,7 @@ function onLineImage_(ev, uid, me) {
   }
   if (!ready) return; // 同一批還有圖片沒到，等最後一張再一起讀
   lineLoading_(uid);
-  if (s.d || s.o) checkSupplement_(ev.replyToken, uid, s);
+  if (s.d || s.o || s.m) checkSupplement_(ev.replyToken, uid, s);
   else startDraft_(ev.replyToken, uid, s);
 }
 
@@ -528,6 +540,7 @@ function startDraft_(token, uid, s) {
     return lineReply_(token, r.error + '\n請再傳一次截圖，或改用網站掃票。');
   }
   if (r.data.docType === 'onsale') return startOnsale_(token, uid, s, r.data);
+  if (r.data.docType === 'merch') return startMerch_(token, uid, s, r.data, r.duplicate);
   if (!str_(r.data.eventName) && !str_(r.data.date) && !num_(r.data.totalPaid)) {
     clearLineSession_(uid);
     return lineReply_(token, '看不出這是購票截圖耶，換一張試試看 🙏');
@@ -890,7 +903,7 @@ function onLineText_(token, uid, me, users, text) {
     if (tradeSession_(uid)) { clearTradeSession_(uid); return lineReply_(token, '已取消，沒有產生文章。'); }
     if (editSession_(uid)) { clearEditSession_(uid); return lineReply_(token, '好，結束修改。'); }
     clearLineSession_(uid);
-    return lineReply_(token, s && s.d ? '已取消這筆，沒有建檔。' : '目前沒有進行中的紀錄。');
+    return lineReply_(token, s && (s.d || s.o || s.m) ? '已取消這筆，沒有建檔。' : '目前沒有進行中的紀錄。');
   }
   if (/^(說明|help|\?|？)$/i.test(text)) return lineReply_(token, LINE_HELP);
   const cmd = lineCommand_(text, me);
@@ -910,6 +923,7 @@ function onLineText_(token, uid, me, users, text) {
   if (s.step === 'dupOrder') return lineReply_(token, ask_('這筆訂單好像已經記過了，要繼續記嗎？', 'dupord', [['go', '還是要記'], ['cancel', '取消']]));
   if (s.step === 'name') return setName_(token, uid, users, text);
   if (s.step === 'supplement') return lineReply_(token, ask_('請先選擇這張新截圖要怎麼處理：', 'supp', [['merge', '補充到這筆'], ['new', '當成新的一筆']]));
+  if (s.m) return onMerchText_(token, uid, s, text);
   if (s.step === 'oconfirm') {
     lineLoading_(uid);
     const r = editOnsale_(s.o, text);
@@ -957,6 +971,8 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'odel') return lineReply_(token, ask_('確定要刪除這個搶票提醒嗎？刪除後不會再提醒。', 'odelok', [[pb.v, '確定刪除'], ['no', '不要']]));
   if (pb.a === 'odelok') return pb.v === 'no' ? lineReply_(token, '好，沒有刪除。') : deleteOnsaleGroup_(token, uid, pb.v);
   if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
+  if (pb.a === 'marr') return arrivalsPick_(token, pb.v);
+  if (pb.a === 'marrok') return arrivalsMark_(token, pb.v);
   if (pb.a === 'trade') return tradePick_(token, uid, pb.v === 'swap' ? 'swap' : 'sell');
   if (pb.a === 'tnote' || pb.a === 'tdeliv' || pb.a === 'tplace' || pb.a === 'tsel' || pb.a === 'tpick') {
     const tr = tradeSession_(uid);
@@ -967,7 +983,17 @@ function onLinePostback_(token, uid, me, pb) {
     return tradeFinish_(token, uid, tr, '');
   }
   const s = lineSession_(uid);
-  if (!s || (!s.d && !s.o)) return lineReply_(token, '這筆已經結束或放太久被清除了，請重新傳截圖 🙏');
+  if (!s || (!s.d && !s.o && !s.m)) return lineReply_(token, '這筆已經結束或放太久被清除了，請重新傳截圖 🙏');
+  if (s.m && pb.a === 'supp' && pb.v === 'merge') {
+    mergeMerch_(s.m, s.pendingData);
+    s.imgs = (s.imgs || []).concat(s.pending || []);
+    s.pending = [];
+    delete s.pendingData;
+    s.step = s.stepBefore;
+    delete s.stepBefore;
+    return lineReply_(token, ['已合併 ✦\n' + merchSummary_(s.m), merchNext_(uid, s)]);
+  }
+  if (s.m && pb.a !== 'supp') return onMerchPostback_(token, uid, me, s, pb);
   if (pb.a === 'ocard') {
     if (pb.v === 'cancel') { clearLineSession_(uid); return lineReply_(token, '已取消，沒有建立搶票提醒。'); }
     if (pb.v === 'edit') return lineReply_(token, '直接打字告訴我要改什麼就好，例如：\n「全面開賣改成 11/4 12:00 拓元」\n「場館改成 TICC」');
@@ -1015,6 +1041,20 @@ function checkSupplement_(token, uid, s) {
   }
   const x = r.data;
   if (s.o && x.docType === 'onsale') return mergeOnsale_(token, uid, s, x);
+  if (s.m) {
+    if (x.docType === 'merch' && (!str_(x.orderNumber) || !s.m.orderNumber || str_(x.orderNumber) === s.m.orderNumber)) {
+      mergeMerch_(s.m, x);
+      s.imgs = (s.imgs || []).concat(s.pending || []);
+      s.pending = [];
+      return lineReply_(token, ['已合併 ✦\n' + merchSummary_(s.m), merchNext_(uid, s)]);
+    }
+    s.pendingData = x;
+    s.stepBefore = s.step;
+    s.step = 'supplement';
+    saveLineSession_(uid, s);
+    return lineReply_(token, ask_('這張截圖和目前這筆（' + (s.m.channel || '周邊') + ' 訂單）看起來不太一樣，要怎麼處理？', 'supp',
+      [['merge', '補充到這筆'], ['new', '當成新的一筆']]));
+  }
   const same = !s.o && (str_(x.orderNumber) && str_(x.orderNumber) === s.d.orderNumber)
     || (str_(x.eventName) && normName_(x.eventName) === normName_(s.d.eventName) && (!str_(x.date) || str_(x.date) === s.d.date));
   if (same) return mergeSupplement_(token, uid, s, x);
@@ -1602,7 +1642,7 @@ function answerQuestion_(text, me) {
   const prompt = [
     '今天是 ' + today_() + '。使用者在追星記帳機器人問了一句話，請判斷要查什麼，只輸出 JSON：',
     '「' + text + '」',
-    'intent 只能是：upcoming（未來場次）、pickup（待取票）、spend（花費）、count（看過幾場）、resale（還沒賣出的轉賣票）、onsale（即將開賣、要搶票的節目）、unknown（其他或看不懂）。',
+    'intent 只能是：upcoming（未來場次）、pickup（待取票）、arrivals（周邊還沒到貨的品項）、spend（花費）、count（看過幾場）、resale（還沒賣出的轉賣票）、onsale（即將開賣、要搶票的節目）、unknown（其他或看不懂）。',
     'artist 是提到的表演者，keyword 是提到的其他關鍵字（例如場館、活動名稱），沒有就填空字串。',
     'year、month 是提到的年份與月份（例如「11月」→ month 11，「今年」→ 今年的年份，「上個月」→ 換算成對應年月），沒提到填 0。',
   ].join('\n');
@@ -1618,6 +1658,7 @@ function answerQuestion_(text, me) {
   if (q.intent === 'count') return countText_(q);
   if (q.intent === 'resale') return resaleText_();
   if (q.intent === 'onsale') return onsaleListMessage_(me.uid, q);
+  if (q.intent === 'arrivals') return arrivalsMessage_();
   return '我可以幫你查：未來場次、待取票、即將開賣、花費、看過幾場、還沒賣出的票，例如「11月有什麼場」「下週有什麼要搶」。\n要記新的票或搶票公告，直接傳截圖給我 ✦';
 }
 
@@ -1630,6 +1671,7 @@ function lineCommand_(text, me) {
   if (t === '本月花費') return spendText_({}, me);
   if (t === '轉賣中') return resaleText_();
   if (t === '即將開賣') return onsaleListMessage_(me.uid, {});
+  if (/^(待到貨|未到貨|還沒到貨|周邊到貨)$/.test(t)) return arrivalsMessage_();
   if (t === '換售資訊') return tradeStart_();
   if (/^(售票|換票)備註$/.test(t)) return tradeNotesText_(t.indexOf('售') === 0 ? 'sell' : 'swap');
   if (/^(售票|換票)備註(改成|改為)?[：:]/.test(t)) return setTradeNotes_(t.indexOf('售') === 0 ? 'sell' : 'swap', text);
@@ -2542,4 +2584,424 @@ function deleteOnsaleGroup_(token, uid, gid) {
   try { setup_(); deleteRows_('onsales', rows.map(function (r) { return r.id; })); } finally { lock.releaseLock(); }
   clearEditSession_(uid);
   lineReply_(token, '已刪除搶票提醒' + (rows[0] ? '「' + rows[0].title + '」' : '') + '。');
+}
+
+/* ================= 周邊訂單 ================= */
+// 傳周邊訂單截圖 → 問品項歸屬、付款 → 確認卡片 → 寫進網站的 orders／items（現貨品項自動建 sales）
+const OWN_LABEL_ = { self: '自留', proxy: '代購', stock: '現貨', pending: '待補' };
+const merchTotal_ = function (m) {
+  return m.items.reduce(function (t, it) { return t + num_(it.unitPrice) * num_(it.quantity); }, 0)
+    + num_(m.domesticShipping) - num_(m.discountAmount);
+};
+const merchItemText_ = function (it) { return [it.name, it.variant].filter(Boolean).join('｜') + ' ×' + num_(it.quantity); };
+
+function knownChannels_() {
+  return countValues_(sheetRows_('orders'), 'channel').slice(0, 30);
+}
+function merchChannel_(v) {
+  v = str_(v);
+  return knownChannels_().filter(function (c) { return normName_(c) === normName_(v); })[0] || v;
+}
+function findMerchOrder_(orderNumber) {
+  const no = str_(orderNumber);
+  if (!no) return null;
+  const hit = sheetRows_('orders').filter(function (o) { return str_(o.orderNumber) === no; })[0];
+  return hit ? { title: (hit.channel || '周邊') + ' 訂單', date: hit.orderDate } : null;
+}
+
+function merchFrom_(x) {
+  const cur = str_(x.currency).toUpperCase();
+  const items = (Array.isArray(x.items) ? x.items : []).map(function (it) {
+    return { id: newId_(), name: str_(it.name), variant: str_(it.variant), unitPrice: num_(it.unitPrice), quantity: num_(it.quantity) || 1, ownership: '', proxyFor: '' };
+  }).filter(function (it) { return it.name; });
+  const shipFrom = /^\d{4}-\d{2}-\d{2}$/.test(str_(x.shipFrom)) ? str_(x.shipFrom) : '';
+  return {
+    channel: merchChannel_(x.channel), orderNumber: str_(x.orderNumber), orderDate: str_(x.orderDate) || today_(),
+    currency: ['TWD', 'KRW', 'JPY', 'USD'].indexOf(cur) >= 0 ? cur : 'TWD', items: items,
+    domesticShipping: num_(x.domesticShipping), discountAmount: Math.abs(num_(x.discountAmount)),
+    estimatedShipDate: shipFrom, shipText: str_(x.shipText), screenTotal: num_(x.totalPaid),
+    paymentMethod: PAY_LABEL_[str_(x.payMethod)] ? str_(x.payMethod) : '', paymentDetail: str_(x.payDetail),
+    payer: '', chargedTwd: '', notes: '', asked: {}, mode: '',
+  };
+}
+function mergeMerch_(m, x) {
+  const n = merchFrom_(x || {});
+  ['channel', 'orderNumber', 'estimatedShipDate', 'shipText', 'paymentMethod', 'paymentDetail'].forEach(function (k) { if (!m[k] && n[k]) m[k] = n[k]; });
+  ['domesticShipping', 'discountAmount', 'screenTotal'].forEach(function (k) { if (!num_(m[k]) && num_(n[k])) m[k] = n[k]; });
+  n.items.forEach(function (it) {
+    const same = m.items.some(function (o) { return normName_(o.name) === normName_(it.name) && normName_(o.variant) === normName_(it.variant) && num_(o.unitPrice) === num_(it.unitPrice); });
+    if (!same) { if (m.mode && m.mode !== 'each') { it.ownership = m.mode; it.proxyFor = m.items[0] ? m.items[0].proxyFor : ''; } m.items.push(it); }
+  });
+}
+
+function startMerch_(token, uid, s, data, duplicate) {
+  s.m = merchFrom_(data);
+  if (!s.m.items.length) {
+    clearLineSession_(uid);
+    return lineReply_(token, '看得出是購物訂單，但沒讀到品項耶，換一張清楚一點的截圖試試看 🙏');
+  }
+  s.meName = (lineUsers_()[uid] || {}).name || '';
+  if (duplicate) {
+    s.step = 'mdupOrder';
+    saveLineSession_(uid, s);
+    return lineReply_(token, ['讀到了 ✦\n' + merchSummary_(s.m), ask_('⚠ 這筆訂單（編號 ' + s.m.orderNumber + '）好像已經記過了：\n'
+      + duplicate.title + (duplicate.date ? '（' + duplicate.date + '）' : ''), 'mdup', [['go', '還是要記'], ['cancel', '取消']])]);
+  }
+  lineReply_(token, ['讀到了 ✦\n' + merchSummary_(s.m), merchNext_(uid, s)]);
+}
+function merchSummary_(m) {
+  return [
+    '周邊訂單｜' + (m.channel || '（沒讀到通路）') + (m.orderNumber ? ' ' + m.orderNumber : ''),
+    [m.orderDate, money_(m.currency, merchTotal_(m)), m.items.length + ' 項'].filter(Boolean).join('｜'),
+  ].join('\n');
+}
+
+const proxyNames_ = function () {
+  const out = countValues_(sheetRows_('items'), 'proxyFor');
+  knownNames_().forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); });
+  return out.slice(0, 10);
+};
+const orderPayers_ = function () {
+  const out = countValues_(sheetRows_('orders'), 'payer');
+  topPayers_().forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); });
+  return out.slice(0, 6);
+};
+
+// 下一題；全部回答完就出確認卡片
+function merchNext_(uid, s) {
+  const m = s.m;
+  const ask = function (step, msg) { s.step = step; saveLineSession_(uid, s); return msg; };
+  const pairs = function (list) { return list.map(function (x) { return [x, x]; }); };
+  if (!m.mode) {
+    return ask('mown', ask_('這筆的品項是？', 'mown', [['self', '全部自留'], ['proxy', '全部代購'], ['stock', '全部現貨'], ['each', '每項分開選'], ['pending', '還不確定']]));
+  }
+  const i = m.items.findIndex(function (it) { return !it.ownership || (it.ownership === 'proxy' && !it.proxyFor); });
+  if (i >= 0) {
+    const it = m.items[i];
+    s.cur = i;
+    if (it.ownership === 'proxy') {
+      return ask('mproxy', ask_((m.mode === 'each' ? '第 ' + (i + 1) + ' 項' : '這筆') + '代購給誰？（其他人可以直接打字名字）', 'mproxy', pairs(proxyNames_())));
+    }
+    return ask('mitem', ask_('第 ' + (i + 1) + ' / ' + m.items.length + ' 項：' + merchItemText_(it), 'mitem',
+      [['self', '自留'], ['proxy', '代購'], ['stock', '現貨'], ['pending', '待補']]));
+  }
+  const skip = [['__skip', '跳過']];
+  if (!m.paymentMethod) return ask('mpay', ask_('付款方式？', 'mpay', Object.keys(PAY_LABEL_).map(function (k) { return [k, PAY_LABEL_[k]]; })));
+  if (!m.paymentDetail && !m.asked.mdetail) return ask('mdetail', ask_('哪張卡或哪個支付平台？可以直接打字（例：永豐、LINE Pay）', 'mdetail', pairs(knownValues_('paymentDetail')).concat(skip)));
+  if (!m.payer) return ask('mpayer', ask_('付款人是誰？（其他人可以直接打字名字）', 'mpayer', pairs(orderPayers_())));
+  if (m.currency !== 'TWD' && !num_(m.chargedTwd) && !m.asked.mcharged) {
+    return ask('mcharged', ask_('信用卡實際刷了多少台幣？直接打數字；還不知道可以跳過，之後到網站補。', 'mcharged', skip));
+  }
+  return ask('mconfirm', merchCard_(m));
+}
+
+// 回答一題；回傳 false 表示看不懂
+function merchAnswer_(s, step, v, typed) {
+  const m = s.m;
+  v = str_(v);
+  if (!v) return false;
+  const own = function (t) {
+    return /分開|每項|各別|個別/.test(t) ? 'each' : /代購|代/.test(t) ? 'proxy' : /現貨|賣|販售/.test(t) ? 'stock'
+      : /不確定|待|不知道/.test(t) ? 'pending' : /自留|自己|我/.test(t) ? 'self' : '';
+  };
+  if (step === 'mown') {
+    if (typed) v = own(v);
+    if (['self', 'proxy', 'stock', 'pending', 'each'].indexOf(v) < 0) return false;
+    m.mode = v;
+    m.items.forEach(function (it) { it.ownership = v === 'each' ? '' : v; it.proxyFor = ''; });
+  } else if (step === 'mitem') {
+    if (typed) v = own(v);
+    if (!OWN_LABEL_[v]) return false;
+    m.items[s.cur].ownership = v;
+  } else if (step === 'mproxy') {
+    const name = v.slice(0, 20);
+    if (m.mode === 'each') m.items[s.cur].proxyFor = name;
+    else m.items.forEach(function (it) { if (it.ownership === 'proxy' && !it.proxyFor) it.proxyFor = name; });
+  } else if (step === 'mpay') {
+    if (typed) v = /信用|刷卡|卡/.test(v) ? 'credit_card' : /轉帳|匯款|ATM/i.test(v) ? 'bank_transfer'
+      : /行動|pay|支付/i.test(v) ? 'mobile_payment' : /現金/.test(v) ? 'cash' : '';
+    if (!PAY_LABEL_[v]) return false;
+    m.paymentMethod = v;
+  } else if (step === 'mdetail') {
+    m.asked.mdetail = true;
+    if (v !== '__skip' && !/^(跳過|不用|沒有|無)$/.test(v)) m.paymentDetail = v;
+  } else if (step === 'mpayer') {
+    m.payer = v.slice(0, 20);
+  } else if (step === 'mcharged') {
+    m.asked.mcharged = true;
+    if (v === '__skip' || /跳過|不知道|還沒|不用/.test(v)) return true;
+    const n = num_(v.replace(/[^\d.]/g, ''));
+    if (!n) return false;
+    m.chargedTwd = n;
+  } else return false;
+  return true;
+}
+
+// 外幣：有實刷就回算匯率，沒有就先用今天的匯率估算
+function merchRate_(m) {
+  if (m.currency === 'TWD') return '';
+  const total = merchTotal_(m), charged = num_(m.chargedTwd);
+  if (total && charged) return Number((m.currency === 'USD' ? charged / total : total / charged).toFixed(4));
+  return fxRate_(m.currency) || '';
+}
+function merchTwd_(m, rate) {
+  if (m.currency === 'TWD') return merchTotal_(m);
+  if (num_(m.chargedTwd)) return num_(m.chargedTwd);
+  if (!rate) return 0;
+  return Math.round(m.currency === 'USD' ? merchTotal_(m) * rate : merchTotal_(m) / rate);
+}
+function merchNotes_(m) {
+  const out = [];
+  if (m.shipText && m.shipText.replace(/\D/g, '') !== m.estimatedShipDate.replace(/\D/g, '')) out.push('預計出貨：' + m.shipText);
+  if (m.currency !== 'TWD') out.push('國際運費尚未確認');
+  if (str_(m.notes)) out.push(str_(m.notes));
+  return out.join('\n');
+}
+
+function merchCard_(m) {
+  const row = function (k, v) {
+    return { type: 'box', layout: 'baseline', spacing: 'md', contents: [
+      ftext_(k, 'sm', C_MUTED, { flex: 2, wrap: false }), ftext_(str_(v) || '—', 'sm', C_INK, { flex: 6 }),
+    ] };
+  };
+  const items = m.items.map(function (it, i) {
+    const own = (OWN_LABEL_[it.ownership] || '待補') + (it.ownership === 'proxy' && it.proxyFor ? '・' + it.proxyFor : '');
+    return { type: 'box', layout: 'vertical', margin: 'md', contents: [
+      ftext_((i + 1) + '. ' + [it.name, it.variant].filter(Boolean).join('｜'), 'sm', C_INK),
+      ftext_(money_(m.currency, it.unitPrice) + ' ×' + num_(it.quantity) + '｜' + own, 'xs', C_MUTED),
+    ] };
+  });
+  const total = merchTotal_(m);
+  const rate = merchRate_(m);
+  const money = ['品項 ' + money_(m.currency, total - num_(m.domesticShipping) + num_(m.discountAmount))];
+  if (num_(m.domesticShipping)) money.push('＋運費 ' + money_(m.currency, m.domesticShipping));
+  if (num_(m.discountAmount)) money.push('－折抵 ' + money_(m.currency, m.discountAmount));
+  money.push('合計 ' + money_(m.currency, total));
+  if (m.currency !== 'TWD') money.push(num_(m.chargedTwd) ? '實刷 TWD ' + num_(m.chargedTwd).toLocaleString('en-US') : rate ? '約 TWD ' + merchTwd_(m, rate).toLocaleString('en-US') + '（估算）' : '');
+  const warn = num_(m.screenTotal) && Math.abs(num_(m.screenTotal) - total) > 0.5
+    ? ftext_('⚠ 截圖上的總額是 ' + money_(m.currency, m.screenTotal) + '，和品項加總不一樣，請檢查品項或運費、折抵。', 'xs', '#B5543C', { margin: 'md' }) : null;
+  const button = function (label, v, style) {
+    return { type: 'button', style: style, height: 'sm', color: style === 'primary' ? C_ACCENT : undefined,
+      action: { type: 'postback', label: label, data: 'a=mcard&v=' + v, displayText: label } };
+  };
+  return {
+    type: 'flex', altText: '請確認：' + (m.channel || '周邊') + ' 訂單',
+    contents: { type: 'bubble', size: 'giga',
+      body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+        ftext_('周邊訂單', 'xs', C_ACCENT, { weight: 'bold' }),
+        ftext_(m.channel || '（沒有通路）', 'lg', C_INK, { weight: 'bold' }),
+        ftext_([m.orderDate, m.orderNumber].filter(Boolean).join('｜') || '—', 'sm', C_MUTED),
+        { type: 'separator', margin: 'md' },
+      ].concat(items).concat([
+        { type: 'separator', margin: 'md' },
+        row('金額', money.filter(Boolean).join('\n')),
+        warn,
+        row('預計出貨', m.shipText || m.estimatedShipDate),
+        row('付款', [PAY_LABEL_[m.paymentMethod] || '', m.paymentDetail].filter(Boolean).join(' ')),
+        row('付款人', m.payer),
+        row('備註', merchNotes_(m)),
+        ftext_('要修改直接打字告訴我，例如「第3項數量改成2」「第2項改成代購給 Jhen」「預計出貨改成7/2」', 'xxs', C_MUTED, { margin: 'md' }),
+      ]).filter(Boolean) },
+      footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+        button('確認建檔', 'confirm', 'primary'), button('要修改', 'edit', 'secondary'), button('取消這筆', 'cancel', 'link'),
+      ] },
+    },
+  };
+}
+
+const MERCH_EDIT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    understood: { type: 'BOOLEAN' }, channel: { type: 'STRING' }, orderNumber: { type: 'STRING' }, orderDate: { type: 'STRING' },
+    currency: { type: 'STRING' }, estimatedShipDate: { type: 'STRING' }, shipText: { type: 'STRING' },
+    domesticShipping: { type: 'NUMBER' }, discountAmount: { type: 'NUMBER' }, chargedTwd: { type: 'NUMBER' },
+    paymentMethod: { type: 'STRING' }, paymentDetail: { type: 'STRING' }, payer: { type: 'STRING' }, notes: { type: 'STRING' },
+    items: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      name: { type: 'STRING' }, variant: { type: 'STRING' }, unitPrice: { type: 'NUMBER' }, quantity: { type: 'NUMBER' },
+      ownership: { type: 'STRING' }, proxyFor: { type: 'STRING' } } } },
+  },
+  required: ['understood'],
+};
+function editMerch_(m, text) {
+  const view = {};
+  Object.keys(MERCH_EDIT_SCHEMA.properties).forEach(function (k) { if (k !== 'understood' && k !== 'items') view[k] = m[k]; });
+  view.items = m.items.map(function (it) {
+    return { name: it.name, variant: it.variant, unitPrice: it.unitPrice, quantity: it.quantity, ownership: it.ownership, proxyFor: it.proxyFor };
+  });
+  const prompt = [
+    '今天是 ' + today_() + '。以下是一筆周邊購物訂單（JSON），items 依序是第 1、2、3… 項：', JSON.stringify(view),
+    '使用者說：「' + text + '」',
+    '請輸出 understood: true，並只包含要修改的欄位。如果改到任何品項（包括刪除或新增），items 要輸出修改後「完整」的品項清單，順序不變，沒改的也要列出。',
+    'ownership 只能是 self（自留）、proxy（代購，proxyFor 填代購對象）、stock（現貨）、pending（待補）；paymentMethod 只能是 credit_card、bank_transfer、mobile_payment、cash；',
+    '日期用 YYYY-MM-DD；預計出貨若是區間，estimatedShipDate 填開始日、shipText 填完整區間。運費不要變成品項。看不懂就只輸出 understood: false。',
+  ].join('\n');
+  const r = gemini_([{ text: prompt }], MERCH_EDIT_SCHEMA);
+  if (r.error) return { error: r.error };
+  const c = r.data || {};
+  if (!c.understood) return { changed: false };
+  let changed = false;
+  Object.keys(c).forEach(function (k) {
+    if (k === 'understood' || k === 'items' || !(k in view)) return;
+    m[k] = typeof c[k] === 'number' ? c[k] : str_(c[k]);
+    changed = true;
+  });
+  if (c.paymentMethod !== undefined && !PAY_LABEL_[m.paymentMethod]) m.paymentMethod = '';
+  if (c.channel !== undefined) m.channel = merchChannel_(m.channel);
+  if (c.currency !== undefined) m.currency = ['TWD', 'KRW', 'JPY', 'USD'].indexOf(str_(m.currency).toUpperCase()) >= 0 ? str_(m.currency).toUpperCase() : 'TWD';
+  if (Array.isArray(c.items)) {
+    const old = m.items;
+    m.items = c.items.filter(function (it) { return str_(it.name); }).map(function (it, i) {
+      const own = OWN_LABEL_[str_(it.ownership)] ? str_(it.ownership) : 'pending';
+      return { id: old[i] ? old[i].id : newId_(), name: str_(it.name), variant: str_(it.variant), unitPrice: num_(it.unitPrice),
+        quantity: num_(it.quantity) || 1, ownership: own, proxyFor: own === 'proxy' ? str_(it.proxyFor) : '' };
+    });
+    changed = true;
+  }
+  return { changed: changed };
+}
+
+// 和網站 computeUnitCostTwd 一樣：實刷（或匯率換算）＋國際運費，依品項原價比例分攤
+function merchUnitCost_(order, items, it) {
+  const sum = items.reduce(function (t, x) { return t + num_(x.unitPrice) * num_(x.quantity); }, 0);
+  const total = sum + num_(order.domesticShipping) - num_(order.discountAmount);
+  const r = num_(order.exchangeRate);
+  const base = num_(order.chargedTwd) || (order.currency === 'TWD' ? total : !r ? 0 : order.currency === 'USD' ? total * r : total / r);
+  if (!base || !sum || !num_(it.quantity)) return 0;
+  return Math.round((base + num_(order.internationalShippingTwd)) * (num_(it.unitPrice) * num_(it.quantity) / sum) / num_(it.quantity));
+}
+
+function confirmMerch_(token, uid, me, s) {
+  const m = s.m;
+  if (!m.channel) return lineReply_(token, '還缺通路，直接打字告訴我，例如「通路是 Weverse Shop」。');
+  if (!m.items.length) return lineReply_(token, '還沒有品項，直接打字告訴我，例如「加一項 專輯 A版 25000 1張」。');
+  const order = {
+    id: newId_(), orderNumber: m.orderNumber, channel: m.channel, orderDate: m.orderDate, estimatedShipDate: m.estimatedShipDate,
+    actualShipDate: '', currency: m.currency, domesticShipping: num_(m.domesticShipping) || '', internationalShippingTwd: m.currency === 'TWD' ? '' : 0,
+    internationalShippingRateTwdPerKg: '', discountAmount: num_(m.discountAmount) || '', weightGrams: '', exchangeRate: merchRate_(m),
+    chargedTwd: num_(m.chargedTwd) || '', payer: m.payer, paymentMethod: m.paymentMethod, paymentDetail: m.paymentDetail,
+    settled: false, notes: merchNotes_(m),
+  };
+  const items = m.items.map(function (it) {
+    return { id: it.id, orderId: order.id, name: it.name, variant: it.variant, unitPrice: num_(it.unitPrice), quantity: num_(it.quantity),
+      ownership: it.ownership || 'pending', proxyFor: it.ownership === 'proxy' ? it.proxyFor : '', arrived: false, sorted: false, proxyPaid: false,
+      salePriceTwd: '', soldQuantity: 0 };
+  });
+  const sales = items.filter(function (it) { return it.ownership === 'stock'; }).map(function (it) {
+    return { id: newId_(), sourceOrderId: order.id, sourceItemId: it.id, sourceOrderNumber: order.orderNumber, sourceChannel: order.channel,
+      name: it.name, variant: it.variant, sourceCurrency: order.currency, unitOriginalPrice: it.unitPrice,
+      unitCostTwd: merchUnitCost_(order, items, it), quantity: it.quantity, salePriceTwd: '', soldQuantity: 0, managedByOwnership: true, createdAt: today_() };
+  });
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    setup_();
+    writeRows_('orders', [order]);
+    writeRows_('items', items);
+    if (sales.length) writeRows_('sales', sales);
+  } finally {
+    lock.releaseLock();
+  }
+  clearLineSession_(uid);
+  const cnt = items.reduce(function (t, it) { return t + num_(it.quantity); }, 0);
+  lineReply_(token, '已建檔 ✦ ' + order.channel + ' 訂單（' + items.length + ' 項、' + cnt + ' 件）\n可以到網站「訂單」頁查看。'
+    + (sales.length ? '\n現貨 ' + sales.length + ' 項已自動加到「販售」。' : '')
+    + (order.currency !== 'TWD' && !order.chargedTwd ? '\n信用卡帳單出來後，記得到網站補「實刷台幣」。' : ''));
+}
+
+function onMerchText_(token, uid, s, text) {
+  if (s.step === 'mdupOrder') return lineReply_(token, ask_('這筆訂單好像已經記過了，要繼續記嗎？', 'mdup', [['go', '還是要記'], ['cancel', '取消']]));
+  if (s.step === 'mconfirm') {
+    lineLoading_(uid);
+    const r = editMerch_(s.m, text);
+    if (r.error) return lineReply_(token, r.error);
+    if (!r.changed) return lineReply_(token, '看不太懂要改哪裡，可以說得更具體一點，例如「第3項數量改成2」「付款人改成 Jhen」。');
+    return lineReply_(token, ['已修改 ✦', merchNext_(uid, s)]);
+  }
+  if (merchAnswer_(s, s.step, text, true)) return lineReply_(token, merchNext_(uid, s));
+  const again = merchNext_(uid, s);
+  again.text = '請點下面的按鈕選擇，或換個說法 🙏\n' + again.text;
+  return lineReply_(token, again);
+}
+function onMerchPostback_(token, uid, me, s, pb) {
+  if (pb.a === 'mdup') {
+    if (pb.v !== 'go') { clearLineSession_(uid); return lineReply_(token, '已取消這筆，沒有建檔。'); }
+    return lineReply_(token, merchNext_(uid, s));
+  }
+  if (pb.a === 'mcard') {
+    if (pb.v === 'cancel') { clearLineSession_(uid); return lineReply_(token, '已取消這筆，沒有建檔。'); }
+    if (pb.v === 'edit') return lineReply_(token, '直接打字告訴我要改什麼就好，例如：\n「第3項數量改成2」\n「第2項改成代購給 Jhen」\n「預計出貨改成 7/2～7/9」');
+    if (s.step !== 'mconfirm') return lineReply_(token, merchNext_(uid, s));
+    return confirmMerch_(token, uid, me, s);
+  }
+  if (pb.a !== s.step) return lineReply_(token, merchNext_(uid, s)); // 按到舊的按鈕 → 重問目前這題
+  if (!merchAnswer_(s, pb.a, pb.v, false)) return lineReply_(token, merchNext_(uid, s));
+  return lineReply_(token, merchNext_(uid, s));
+}
+
+/* ---------- 待到貨 ---------- */
+// 依品名彙總還沒到貨的品項；點一個品名可以標記到貨
+function arrivalsMessage_() {
+  const orders = {};
+  sheetRows_('orders').forEach(function (o) { orders[o.id] = o; });
+  const groups = {};
+  sheetRows_('items').forEach(function (it) {
+    if (it.arrived === 'true' || it.arrived === 'TRUE') return;
+    const o = orders[it.orderId];
+    if (!o) return;
+    const k = str_(it.name) || '未命名品項';
+    (groups[k] = groups[k] || []).push({ it: it, o: o });
+  });
+  const names = Object.keys(groups);
+  if (!names.length) return '所有周邊都到貨了 ✦';
+  const ship = function (list) {
+    const ds = list.map(function (r) { return str_(r.o.estimatedShipDate); }).filter(function (d) { return /^\d{4}-\d{2}-\d{2}/.test(d); }).sort();
+    return ds[0] ? ds[0].slice(0, 10) : '';
+  };
+  names.sort(function (a, b) { return (ship(groups[a]) || '9999').localeCompare(ship(groups[b]) || '9999') || a.localeCompare(b); });
+  const total = names.reduce(function (t, n) { return t + groups[n].reduce(function (x, r) { return x + num_(r.it.quantity); }, 0); }, 0);
+  const entries = names.map(function (n) {
+    const list = groups[n];
+    const qty = list.reduce(function (x, r) { return x + num_(r.it.quantity); }, 0);
+    return {
+      date: ship(list), top: '共 ' + qty + ' 件', title: n,
+      lines: list.slice(0, 4).map(function (r) {
+        return [str_(r.it.variant) || '—', '×' + num_(r.it.quantity), OWN_LABEL_[r.it.ownership] + (r.it.ownership === 'proxy' && r.it.proxyFor ? '・' + r.it.proxyFor : ''), r.o.channel].filter(Boolean).join('｜');
+      }).concat(list.length > 4 ? ['…還有 ' + (list.length - 4) + ' 筆'] : []),
+      action: { type: 'postback', label: '標記到貨', data: 'a=marr&v=' + list[0].it.id, displayText: '到貨：' + n.slice(0, 30) },
+    };
+  });
+  return agendaMessage_('📦 待到貨', entries, { sub: names.length + ' 個品項・' + total + ' 件（日期是預計出貨）', foot: '點一個品項可以標記到貨。' });
+}
+function arrivalsPick_(token, itemId) {
+  const first = sheetRows_('items').filter(function (it) { return it.id === itemId; })[0];
+  if (!first) return lineReply_(token, '找不到這個品項，可能已經改過了。');
+  const name = str_(first.name) || '未命名品項';
+  const orders = {};
+  sheetRows_('orders').forEach(function (o) { orders[o.id] = o; });
+  const list = sheetRows_('items').filter(function (it) {
+    return (str_(it.name) || '未命名品項') === name && it.arrived !== 'true' && it.arrived !== 'TRUE' && orders[it.orderId];
+  });
+  if (!list.length) return lineReply_(token, '「' + name + '」已經都到貨了 ✦');
+  const opts = [['all:' + itemId, '全部到貨（' + list.length + ' 筆）']].concat(list.slice(0, 11).map(function (it) {
+    return [it.id, ((str_(it.variant) || '—') + ' ×' + num_(it.quantity) + ' ' + str_(orders[it.orderId].channel)).slice(0, 20)];
+  }));
+  lineReply_(token, ask_('「' + name + '」哪些到貨了？', 'marrok', list.length === 1 ? [[list[0].id, '確定到貨'], ['no', '還沒']] : opts.concat([['no', '都還沒']])));
+}
+function arrivalsMark_(token, v) {
+  if (v === 'no') return lineReply_(token, '好，沒有變更。');
+  const rows = sheetRows_('items');
+  const first = rows.filter(function (it) { return it.id === v.replace(/^all:/, ''); })[0];
+  const name = first ? str_(first.name) || '未命名品項' : '';
+  const hit = !first ? [] : v.indexOf('all:') === 0
+    ? rows.filter(function (it) { return (str_(it.name) || '未命名品項') === name && it.arrived !== 'true' && it.arrived !== 'TRUE'; })
+    : [first];
+  if (!hit.length) return lineReply_(token, '找不到這個品項，可能已經改過了。');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    writeRows_('items', hit.map(function (it) { return Object.assign({}, it, { arrived: 'true' }); }));
+  } finally {
+    lock.releaseLock();
+  }
+  lineReply_(token, '已標記到貨 ✦ ' + hit.map(function (it) { return merchItemText_({ name: it.name, variant: it.variant, quantity: it.quantity }); }).join('\n'));
 }

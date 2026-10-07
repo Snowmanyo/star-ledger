@@ -22,7 +22,7 @@ const TABLES = {
   orders: ['id', 'orderNumber', 'channel', 'orderDate', 'estimatedShipDate', 'actualShipDate', 'currency', 'domesticShipping', 'internationalShippingTwd', 'internationalShippingRateTwdPerKg', 'discountAmount', 'weightGrams', 'exchangeRate', 'chargedTwd', 'payer', 'paymentMethod', 'paymentDetail', 'settled', 'notes'],
   items: ['id', 'orderId', 'name', 'variant', 'unitPrice', 'quantity', 'ownership', 'proxyFor', 'arrived', 'sorted', 'proxyPaid', 'salePriceTwd', 'soldQuantity'],
   sales: ['id', 'sourceOrderId', 'sourceItemId', 'sourceOrderNumber', 'sourceChannel', 'name', 'variant', 'sourceCurrency', 'unitOriginalPrice', 'unitCostTwd', 'quantity', 'salePriceTwd', 'soldQuantity', 'managedByOwnership', 'createdAt'],
-  events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt', 'coverUrl', 'startTime'],
+  events: ['id', 'name', 'artist', 'city', 'venue', 'startDate', 'endDate', 'eventNumber', 'originalDate', 'eventType', 'liveTour', 'seriesEvent', 'seat', 'ticketPriceTwd', 'guest', 'payer', 'settled', 'notes', 'createdAt', 'coverUrl', 'startTime', 'ticketUrl', 'noticeUrl'],
   ledger: ['id', 'type', 'category', 'date', 'title', 'eventId', 'amountTwd', 'currency', 'originalAmount', 'exchangeRate', 'payer', 'paymentMethod', 'paymentDetail', 'counterparty', 'expectedReceivableTwd', 'receivedTwd', 'notes', 'ticketType', 'ticketArea', 'ticketRow', 'ticketSeat', 'attendee', 'ticketStatus', 'createdAt', 'settled', 'ticketFaceTwd', 'ticketBenefitTwd', 'ticketFeeTwd', 'ticketPlatform', 'ticketAccount', 'ticketCount', 'splits', 'ticketPickupDate', 'ticketPickedUp', 'ticketOrderNumber', 'ticketPickupMethod'],
   transfers: ['id', 'date', 'eventId', 'kind', 'person', 'ticketCount', 'ticketArea', 'ticketRow', 'ticketSeat', 'costTwd', 'amountTwd', 'settled', 'notes', 'createdAt', 'title', 'feeTwd',
     'artist', 'eventName', 'startTime', 'venue', 'city', 'faceTwd', 'platform', 'account', 'orderNumber', 'pickupDate', 'pickupMethod', 'pickedUp', 'ticketFeeTwd',
@@ -30,7 +30,7 @@ const TABLES = {
   aliases: ['id', 'field', 'from', 'to', 'createdBy', 'createdAt'], // 習慣記法：讀到 from 一律記成 to
   // 搶票提醒：一波開賣一列；watchers／done 是 LINE 使用者 id 的 JSON 陣列
   onsales: ['id', 'groupId', 'title', 'artist', 'venue', 'city', 'showDates', 'phase', 'saleAt', 'platform', 'price', 'notes',
-    'watchers', 'done', 'sentEve', 'sentLead', 'createdBy', 'createdAt'],
+    'watchers', 'done', 'sentEve', 'sentLead', 'createdBy', 'createdAt', 'ticketUrl', 'noticeUrl'],
 };
 
 function setup_() {
@@ -373,6 +373,7 @@ const LINE_HELP = [
   '🛍 周邊：傳周邊訂單截圖給我（品項多可以分幾張一起傳）→ 選品項歸屬、付款 → 確認建檔，會寫進網站「訂單」。打「待到貨」看還沒到的周邊，點一個品項可以標記到貨。',
   '📝 補登：打「補登」列出還沒補實刷台幣或國際運費的周邊訂單，點一筆後打「實刷 2580」「重量 1200g 費率 120」；也可以直接打「訂單編號 實刷 2580」。',
   '💾 備份：每週日凌晨 3 點自動備份試算表到雲端硬碟（留最近 8 份）；打「備份」可以馬上備份一次。',
+  '🔗 活動網頁：「未來場次」「即將開賣」每場可以點「🔍 找活動網頁」搜尋；找到後把網址貼給我、選是哪一場就會存起來，之後直接顯示「🎫 售票頁」「📢 公告」。',
   '🎫 搶票：傳主辦單位的售票公告截圖給我，確認後會在開賣前一天晚上和開賣前 30 分鐘提醒要搶的人。',
   '🔎 查詢：用下方選單，或直接問我，例如「11月有什麼場」「DAY6 今年看了幾場」「今年花多少」。',
   '🎫 未來場次：每場會列出座位、誰要去、取票了沒；取完票點下方「已取」標記。只想看還沒取的票可以打「待取票」。',
@@ -919,6 +920,7 @@ function onLineText_(token, uid, me, users, text) {
   if (/^(取消|cancel)$/i.test(text)) {
     if (tradeSession_(uid)) { clearTradeSession_(uid); return lineReply_(token, '已取消，沒有產生文章。'); }
     if (editSession_(uid)) { clearEditSession_(uid); return lineReply_(token, '好，結束修改。'); }
+    if (cache_().get('lu_' + uid)) { cache_().remove('lu_' + uid); return lineReply_(token, '好，網址沒有存。'); }
     clearLineSession_(uid);
     return lineReply_(token, s && (s.d || s.o || s.m) ? '已取消這筆，沒有建檔。' : '目前沒有進行中的紀錄。');
   }
@@ -928,6 +930,9 @@ function onLineText_(token, uid, me, users, text) {
   const trade = tradeSession_(uid);
   if (trade) return onTradeText_(token, uid, trade, text);
   const ed = editSession_(uid);
+  const url = urlIn_(text);
+  if (url && ed && ed.kind === 'onsale') return saveLink_(token, uid, 'o:' + ed.id, url, urlKind_(url));
+  if (!s && !ed && (url || cache_().get('lu_' + uid)) && onLinkText_(token, uid, text, url)) return;
   if (ed) return ed.kind === 'transfer' ? editTransferText_(token, uid, ed, text) : ed.kind === 'order' ? fillOrderText_(token, uid, ed, text) : editOnsaleGroupText_(token, uid, ed, text);
   if (!s) {
     if (PROPS.getProperty('ld_' + uid)) {
@@ -991,6 +996,7 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
   if (pb.a === 'marr') return arrivalsPick_(token, pb.v);
   if (pb.a === 'ofill') return openOrderFill_(token, uid, pb.v);
+  if (pb.a === 'lurl' || pb.a === 'lkind') return onLinkPostback_(token, uid, pb);
   if (pb.a === 'ocost') return recalcOrderCost_(token, pb.v);
   if (pb.a === 'marrok') return arrivalsMark_(token, pb.v);
   if (pb.a === 'trade') return tradePick_(token, uid, pb.v === 'swap' ? 'swap' : 'sell');
@@ -1357,6 +1363,11 @@ function agendaRow_(e) {
     return typeof x === 'string' ? ftext_(x, 'xs', C_MUTED) : ftext_(x.t, 'xs', x.c || C_MUTED, x.b ? { weight: 'bold' } : null);
   }))
     .concat(e.status ? [ftext_(e.status, 'xs', e.statusColor || C_ACCENT, { weight: 'bold' })] : []).filter(Boolean) };
+  if (e.links && e.links.length) {
+    right.contents.push({ type: 'box', layout: 'horizontal', spacing: 'lg', margin: 'sm', contents: e.links.map(function (l) {
+      return ftext_(l.label, 'xs', C_ACCENT, { weight: 'bold', flex: 0, wrap: false, decoration: 'underline', action: { type: 'uri', label: l.label.slice(0, 20), uri: l.uri } });
+    }) });
+  }
   const row = { type: 'box', layout: 'horizontal', spacing: 'md', margin: 'lg', contents: [left, right] };
   if (e.action) row.action = e.action; // 整筆可以點
   return row;
@@ -1419,7 +1430,7 @@ function upcomingText_(q, name, all) {
       lines.push(statusLine(it));
       if (!it.picked) toPick.push(it);
     });
-    return { date: e.startDate, time: e.startTime, top: e.artist, title: e.name, lines: lines };
+    return { date: e.startDate, time: e.startTime, top: e.artist, title: e.name, lines: lines, links: eventLinks_(e) };
   });
   // 轉賣的票：還沒取的也列在最後，方便一起處理
   const byId = {};
@@ -2172,6 +2183,7 @@ function onsaleListMessage_(uid, q) {
         .concat([g.first.notes ? '⚠ ' + g.first.notes : '']),
       status: mine ? (g.done.indexOf(uid) >= 0 ? '已結束' : '👀 你要搶') : '', statusColor: C_ACCENT,
       action: { type: 'postback', label: '修改', data: 'a=oedit&v=' + g.id, displayText: '修改 ' + g.first.title.slice(0, 20) },
+      links: eventLinks_({ ticketUrl: g.first.ticketUrl, noticeUrl: g.first.noticeUrl, artist: g.first.artist, name: g.first.title, city: g.first.city }),
     };
   });
   const join = list.filter(function (g) { return g.watchers.indexOf(uid) < 0; }).slice(0, 13);
@@ -2239,6 +2251,10 @@ function onsaleTick_(now) {
       }).join('\n\n') + '\n\n搶完可以點下面告訴我結果。', 'ogot',
         x.lead.slice(0, 6).map(function (r) { return [r.groupId, '搶到了：' + r.title]; })
           .concat(x.lead.slice(0, 6).map(function (r) { return ['miss:' + r.groupId, '沒搶到：' + r.title]; }))));
+      const link = onsaleLinkMessage_(x.lead); // 售票頁按鈕放在後面；快速回覆只能掛在最後一則，所以移過去
+      link.quickReply = msgs[msgs.length - 1].quickReply;
+      delete msgs[msgs.length - 1].quickReply;
+      msgs.push(link);
     }
     linePush_([id], msgs);
   });
@@ -2588,7 +2604,7 @@ function rewriteOnsaleGroup_(gid, o) {
         id: prev ? prev.id : newId_(), groupId: gid, title: o.title, artist: o.artist, venue: o.venue, city: o.city, showDates: o.showDates,
         phase: sl.phase, saleAt: sl.saleAt, platform: sl.platform, price: o.price, notes: o.notes,
         watchers: f.watchers, done: f.done, sentEve: prev ? prev.sentEve : '', sentLead: prev ? prev.sentLead : '',
-        createdBy: f.createdBy, createdAt: f.createdAt,
+        createdBy: f.createdBy, createdAt: f.createdAt, ticketUrl: f.ticketUrl, noticeUrl: f.noticeUrl,
       };
     });
     const removed = old.filter(function (r) { return !rows.some(function (x) { return x.id === r.id; }); }).map(function (r) { return r.id; });
@@ -3243,4 +3259,105 @@ function testGeminiSearch() {
     } else note = res.getContentText().slice(0, 200);
     Logger.log(m + ' → ' + code + ' ' + note);
   });
+}
+
+/* ---------- 活動網頁：售票頁、主辦公告（貼網址存；沒有就給 Google 搜尋連結） ---------- */
+const TICKET_DOMAINS_ = ['kktix', 'tixcraft', 'ibon', 'kham', 'ticket.com.tw', 'famiticket', 'ticketplus', 'opentix', 'accupass', 'yes24',
+  'interpark', 'nol.', 'melon', 'ticketlink', 'ticketmaster', 'eplus', 't.pia', 'l-tike', 'eventbrite', 'klook', 'kkday'];
+const urlIn_ = function (text) { const m = String(text).match(/https?:\/\/[^\s<>"'）)」]+/); return m ? m[0] : ''; };
+const urlKind_ = function (url) { const u = url.toLowerCase(); return TICKET_DOMAINS_.some(function (d) { return u.indexOf(d) >= 0; }) ? 'ticket' : 'notice'; };
+const LINK_LABEL_ = { ticket: '🎫 售票頁', notice: '📢 公告' };
+const searchUrl_ = function (e) {
+  return 'https://www.google.com/search?q=' + encodeURIComponent([e.artist, e.name, e.city, '售票'].map(str_).filter(Boolean).join(' '));
+};
+function eventLinks_(e) {
+  const out = [];
+  if (/^https?:/.test(str_(e.ticketUrl))) out.push({ label: LINK_LABEL_.ticket, uri: str_(e.ticketUrl) });
+  if (/^https?:/.test(str_(e.noticeUrl))) out.push({ label: LINK_LABEL_.notice, uri: str_(e.noticeUrl) });
+  if (out.length < 2) out.push({ label: out.length ? '🔍 搜尋' : '🔍 找活動網頁', uri: searchUrl_(e) });
+  return out;
+}
+function onsaleLinkMessage_(rows) {
+  const seen = {};
+  const buttons = [];
+  rows.forEach(function (r) {
+    if (seen[r.groupId]) return;
+    seen[r.groupId] = true;
+    const short = String(r.title).slice(0, 12);
+    if (/^https?:/.test(str_(r.ticketUrl))) buttons.push({ label: '🎫 ' + short, uri: str_(r.ticketUrl) });
+    else buttons.push({ label: '🔍 ' + short, uri: searchUrl_({ artist: r.artist, name: r.title, city: r.city }) });
+  });
+  return { type: 'flex', altText: '售票頁連結', contents: { type: 'bubble', size: 'kilo', body: { type: 'box', layout: 'vertical', spacing: 'sm', contents:
+    [ftext_('售票頁', 'xs', C_MUTED)].concat(buttons.slice(0, 6).map(function (b) {
+      return { type: 'button', style: 'primary', height: 'sm', color: C_ACCENT, action: { type: 'uri', label: b.label.slice(0, 20), uri: b.uri } };
+    })) } } };
+}
+
+// 貼網址 → 選是哪一場（未來場次＋即將開賣）；沒有要的可以打關鍵字縮小
+function linkTargets_(q) {
+  const today = today_();
+  const out = [];
+  sheetRows_('events').filter(function (e) { return String(e.startDate) >= today && (!q || matchEvent_(e, { keyword: q })); })
+    .sort(function (a, b) { return String(a.startDate).localeCompare(String(b.startDate)); })
+    .forEach(function (e) { out.push(['e:' + e.id, shortMD_(e.startDate) + ' ' + (e.artist || e.name)]); });
+  onsaleGroups_().filter(function (g) { return g.rows.some(function (r) { return String(r.saleAt) >= today; })
+    && (!q || matchEvent_({ name: g.first.title, artist: g.first.artist, venue: g.first.venue }, { keyword: q })); })
+    .forEach(function (g) { out.push(['o:' + g.id, '開賣 ' + (g.first.artist || g.first.title)]); });
+  return out;
+}
+function onLinkText_(token, uid, text, url) {
+  const raw = cache_().get('lu_' + uid);
+  const lu = url ? { url: url, kind: urlKind_(url) } : JSON.parse(raw);
+  cache_().put('lu_' + uid, JSON.stringify(lu), 1800);
+  const q = url ? str_(text.replace(url, '')) : str_(text);
+  let opts = linkTargets_(q);
+  if (!opts.length && !url) { cache_().remove('lu_' + uid); return false; } // 打的不是關鍵字 → 當一般訊息處理
+  if (!opts.length && q) opts = linkTargets_('');
+  if (!opts.length) { cache_().remove('lu_' + uid); lineReply_(token, '目前沒有未來場次或即將開賣的節目可以存這個網址。'); return true; }
+  const more = opts.length > 12 ? '\n場次太多沒列完，可以打關鍵字縮小，例如「DAY6」。' : '';
+  lineReply_(token, ask_('這是哪一場的' + (lu.kind === 'ticket' ? '售票頁' : '公告') + '網址？' + more + '\n（不存的話打「取消」）', 'lurl', opts.slice(0, 12).concat([['no', '不存']])));
+  return true;
+}
+function onLinkPostback_(token, uid, pb) {
+  const lu = JSON.parse(cache_().get('lu_' + uid) || 'null');
+  if (pb.a === 'lkind') {
+    const parts = pb.v.split('|'); // target|kind
+    const last = JSON.parse(cache_().get('lul_' + uid) || 'null');
+    if (!last) return lineReply_(token, '放太久了，請重新貼一次網址。');
+    return saveLink_(token, uid, parts[0], last.url, parts[1], last.kind);
+  }
+  if (!lu) return lineReply_(token, '放太久了，請重新貼一次網址。');
+  cache_().remove('lu_' + uid);
+  if (pb.v === 'no') return lineReply_(token, '好，沒有存。');
+  return saveLink_(token, uid, pb.v, lu.url, lu.kind);
+}
+// target：e:活動 id 或 o:搶票 groupId；kind：ticket／notice；moveFrom：改類型時清掉原本那一欄
+function saveLink_(token, uid, target, url, kind, moveFrom) {
+  const key = kind === 'ticket' ? 'ticketUrl' : 'noticeUrl';
+  const other = kind === 'ticket' ? 'noticeUrl' : 'ticketUrl';
+  let title = '';
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    setup_();
+    if (target.indexOf('e:') === 0) {
+      const e = sheetRows_('events').filter(function (x) { return x.id === target.slice(2); })[0];
+      if (!e) return lineReply_(token, '找不到這一場，可能已經被刪除了。');
+      e[key] = url;
+      if (moveFrom && moveFrom !== kind && e[other] === url) e[other] = '';
+      writeRows_('events', [e]);
+      title = eventTitle_(e);
+    } else {
+      const rows = groupRows_(target.slice(2));
+      if (!rows.length) return lineReply_(token, '找不到這個搶票提醒，可能已經被刪除了。');
+      rows.forEach(function (r) { r[key] = url; if (moveFrom && moveFrom !== kind && r[other] === url) r[other] = ''; });
+      writeRows_('onsales', rows);
+      title = rows[0].title;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  cache_().put('lul_' + uid, JSON.stringify({ url: url, kind: kind }), 1800);
+  const flip = kind === 'ticket' ? 'notice' : 'ticket';
+  lineReply_(token, ask_('已存成「' + title + '」的' + LINK_LABEL_[kind] + ' ✦', 'lkind', [[target + '|' + flip, '改成' + LINK_LABEL_[flip].slice(2)]]));
 }

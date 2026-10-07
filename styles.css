@@ -389,3 +389,6 @@ a { color: var(--accent); }
 .scan-done { text-align: center; padding: 26px 0 0; }
 .scan-done .glyph { font-size: 34px; color: var(--accent); }
 .scan-done-title { font-family: var(--serif); font-size: 20px; font-weight: 600; margin: 6px 0 4px; }
+.ev-links { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 6px; font-size: 12px; }
+.ev-link { color: var(--accent); font-weight: 600; text-decoration: none; }
+.ev-link:hover { text-decoration: underline; }

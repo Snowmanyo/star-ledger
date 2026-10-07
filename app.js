@@ -635,6 +635,7 @@ function renderHome(view) {
           ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
           ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
         </div>
+        ${linksHtml(e)}
       </div>
     </div>
   </div>`).join('') : emptyHtml('近期沒有安排活動')}
@@ -1024,6 +1025,7 @@ function eventListHtml() {
           ${e.venue ? `<span>${esc(e.city)} ${esc(e.venue)}</span>` : ''}
           ${e.seat ? `<span>${esc(e.seat)}</span>` : ''}
         </div>
+        ${String(e.startDate || '') >= today() || e.ticketUrl || e.noticeUrl ? linksHtml(e) : ''}
         <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px">
           <div style="min-width:0">
             ${e.eventType ? `<span class="badge accent">${esc(e.eventType)}</span>` : ''}
@@ -1043,6 +1045,16 @@ const saleAtText = at => {
   const d = new Date(at.slice(0, 10) + 'T00:00:00');
   return `${Number(at.slice(5, 7))}/${Number(at.slice(8, 10))}(${'日一二三四五六'[d.getDay()]}) ${at.slice(11, 16)}`;
 };
+// 活動網頁：存了就顯示「售票頁／公告」，沒有就給 Google 搜尋（點連結不會打開卡片）
+const searchUrl = e => 'https://www.google.com/search?q=' + encodeURIComponent([e.artist, e.name || e.title, e.city, '售票'].filter(Boolean).join(' '));
+function linksHtml(e) {
+  const a = (href, label) => `<a class="ev-link" href="${esc(href)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${label}</a>`;
+  const out = [];
+  if (/^https?:/.test(e.ticketUrl || '')) out.push(a(e.ticketUrl, '🎫 售票頁'));
+  if (/^https?:/.test(e.noticeUrl || '')) out.push(a(e.noticeUrl, '📢 公告'));
+  if (out.length < 2) out.push(a(searchUrl(e), out.length ? '🔍 搜尋' : '🔍 找活動網頁'));
+  return `<div class="ev-links">${out.join('')}</div>`;
+}
 function onsaleGroups() {
   const m = {};
   (DB.onsales || []).forEach(r => { (m[r.groupId] = m[r.groupId] || []).push(r); });
@@ -1063,6 +1075,7 @@ function onsaleListHtml() {
       <div class="row-meta">${g.first.artist ? `<span>${esc(g.first.artist)}</span>` : ''}${g.first.venue ? `<span>${esc([g.first.city, g.first.venue].filter(Boolean).join(' '))}</span>` : ''}</div>
       ${g.rows.map(r => `<div class="row-meta"><span>🎫 ${esc(r.phase || '開賣')}　${esc(saleAtText(r.saleAt))}${r.platform ? '｜' + esc(r.platform) : ''}</span></div>`).join('')}
       ${g.first.notes ? `<div class="row-meta"><span>⚠ ${esc(g.first.notes)}</span></div>` : ''}
+      ${linksHtml(g.first)}
     </div>`;
   };
   let html = `<div class="section-note">在 LINE 傳售票公告就會建立；這裡可以修改、刪除，或按右下角＋手動新增</div>`;
@@ -1075,7 +1088,7 @@ function onsaleListHtml() {
 }
 function openOnsaleForm(groupId) {
   const g = groupId ? onsaleGroups().find(x => x.id === groupId) : null;
-  const base = g ? g.first : { title: '', artist: '', venue: '', city: '', showDates: '', price: '', notes: '' };
+  const base = g ? g.first : { title: '', artist: '', venue: '', city: '', showDates: '', price: '', notes: '', ticketUrl: '', noticeUrl: '' };
   let phases = g ? g.rows.map(r => ({ id: r.id, phase: r.phase, saleAt: r.saleAt, platform: r.platform })) : [{ id: '', phase: '全面開賣', saleAt: '', platform: '' }];
   const phaseRow = (p, i) => `<div class="item-block" style="padding:10px 12px 4px">
     <div class="field-row">
@@ -1101,6 +1114,9 @@ function openOnsaleForm(groupId) {
   <div id="phases-wrap"></div>
   ${fieldHtml('票價', `<input id="o-price" value="${esc(base.price)}">`)}
   ${fieldHtml('注意事項', `<textarea id="o-notes" rows="2">${esc(base.notes)}</textarea>`)}
+  ${fieldHtml('售票頁網址', `<input id="o-ticketUrl" type="url" placeholder="https://" value="${esc(base.ticketUrl)}">`)}
+  ${fieldHtml('主辦公告網址', `<input id="o-noticeUrl" type="url" placeholder="https://" value="${esc(base.noticeUrl)}">`)}
+  <div class="hint"><a href="${esc(searchUrl(base))}" target="_blank" rel="noopener" id="o-search">🔍 用 Google 找活動網頁</a></div>
   <div class="hint">開賣前一天晚上和開賣前會在 LINE 提醒按了「我也要搶」的人；改了開賣時間會重新提醒。</div>
   <div class="sheet-actions"><button class="btn primary" id="onsale-save">儲存</button></div>`;
   openSheet(html);
@@ -1118,7 +1134,7 @@ function openOnsaleForm(groupId) {
   $('#onsale-save').onclick = () => {
     readPhases();
     const info = {};
-    ['title', 'artist', 'city', 'venue', 'showDates', 'price', 'notes'].forEach(k => { info[k] = $('#o-' + k).value.trim(); });
+    ['title', 'artist', 'city', 'venue', 'showDates', 'price', 'notes', 'ticketUrl', 'noticeUrl'].forEach(k => { info[k] = $('#o-' + k).value.trim(); });
     if (!info.title) { toast('請填節目名稱'); return; }
     const valid = phases.filter(p => p.saleAt);
     if (!valid.length) { toast('至少要有一波開賣時間'); return; }
@@ -1922,6 +1938,9 @@ function openEventForm(existing) {
   ${fieldHtml('嘉賓', `<input id="e-guest" value="${esc(ev.guest)}">`)}
   <label class="check-row">已結清 <input type="checkbox" id="e-settled" ${ev.settled ? 'checked' : ''}></label>
   ${fieldHtml('備註', `<textarea id="e-notes" rows="2">${esc(ev.notes)}</textarea>`)}
+  ${fieldHtml('售票頁網址', `<input id="e-ticketUrl" type="url" placeholder="https://" value="${esc(ev.ticketUrl)}">`)}
+  ${fieldHtml('主辦公告網址', `<input id="e-noticeUrl" type="url" placeholder="https://" value="${esc(ev.noticeUrl)}">`)}
+  <div class="hint"><a href="${esc(searchUrl(ev))}" target="_blank" rel="noopener">🔍 用 Google 找活動網頁</a>（找到後把網址貼到上面兩格）</div>
   <div class="form-section">封面圖 <button class="btn line small" id="cover-pick">上傳照片</button></div>
   <input type="file" id="cover-file" accept="image/*" style="display:none">
   ${fieldHtml('圖片網址（上傳後自動填入，也可直接貼網址）', `<input id="e-coverUrl" value="${esc(ev.coverUrl)}">`)}
@@ -1943,7 +1962,7 @@ function openEventForm(existing) {
   $('#sh-close').onclick = closeSheet;
 
   function readEvent() {
-    ['name', 'artist', 'startDate', 'startTime', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'notes', 'coverUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
+    ['name', 'artist', 'startDate', 'startTime', 'city', 'venue', 'eventType', 'liveTour', 'seriesEvent', 'guest', 'notes', 'coverUrl', 'ticketUrl', 'noticeUrl'].forEach(k => { ev[k] = $('#e-' + k).value.trim(); });
     ev.settled = $('#e-settled').checked;
   }
   $('#cover-pick').onclick = () => $('#cover-file').click();

@@ -354,6 +354,7 @@ const AI_FIELDS = ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'even
   'ticketCount', 'currency', 'unitFace', 'unitBenefit', 'unitFee', 'totalPaid', 'orderNumber', 'pickupDate', 'pickupMethod',
   'platform', 'account', 'payMethod', 'payDetail'];
 const LINE_HELP = [
+  '📤 上傳截圖：按選單「上傳截圖」→［從相簿選］就能挑圖片；也可以照舊用輸入框旁的＋傳圖。',
   '📸 記票：傳購票截圖給我（同一筆訂單可一次傳 2～3 張）→ 回答幾個問題 → 確認卡片按「確認建檔」。隨時輸入「取消」可以放棄目前這筆。',
   '🛍 周邊：傳周邊訂單截圖給我（品項多可以分幾張一起傳）→ 選品項歸屬、付款 → 確認建檔，會寫進網站「訂單」。打「待到貨」看還沒到的周邊，點一個品項可以標記到貨。',
   '🎫 搶票：傳主辦單位的售票公告截圖給我，確認後會在開賣前一天晚上和開賣前 30 分鐘提醒要搶的人。',
@@ -1673,6 +1674,7 @@ function lineCommand_(text, me) {
   if (t === '即將開賣') return onsaleListMessage_(me.uid, {});
   if (/^(待到貨|未到貨|還沒到貨|周邊到貨)$/.test(t)) return arrivalsMessage_();
   if (t === '換售資訊') return tradeStart_();
+  if (t === '上傳截圖') return uploadPrompt_();
   if (/^(售票|換票)備註$/.test(t)) return tradeNotesText_(t.indexOf('售') === 0 ? 'sell' : 'swap');
   if (/^(售票|換票)備註(改成|改為)?[：:]/.test(t)) return setTradeNotes_(t.indexOf('售') === 0 ? 'sell' : 'swap', text);
   if (t === '行事曆') return calendarText_();
@@ -1874,11 +1876,12 @@ function setupRichMenu_() {
   const head = { Authorization: 'Bearer ' + PROPS.getProperty('LINE_TOKEN') };
   const old = PROPS.getProperty('RICHMENU_ID');
   if (old) UrlFetchApp.fetch('https://api.line.me/v2/bot/richmenu/' + old, { method: 'delete', headers: head, muteHttpExceptions: true });
-  const labels = ['未來場次', '即將開賣', '轉賣中', '換售資訊', '說明'];
+  const labels = ['上傳截圖', '未來場次', '即將開賣', '轉賣中', '換售資訊', '說明'];
   const menu = {
     size: { width: 2500, height: 843 }, selected: true, name: '追星記票', chatBarText: '選單',
     areas: labels.map(function (label, i) {
-      const b = { x: i * 500, y: 0, width: 500, height: 843 }; // 一排 5 格
+      const x = Math.round(i * 2500 / labels.length);
+      const b = { x: x, y: 0, width: Math.round((i + 1) * 2500 / labels.length) - x, height: 843 }; // 一排 6 格
       return { bounds: b, action: { type: 'message', text: label } };
     }),
   };
@@ -2936,6 +2939,14 @@ function onMerchPostback_(token, uid, me, s, pb) {
   if (pb.a !== s.step) return lineReply_(token, merchNext_(uid, s)); // 按到舊的按鈕 → 重問目前這題
   if (!merchAnswer_(s, pb.a, pb.v, false)) return lineReply_(token, merchNext_(uid, s));
   return lineReply_(token, merchNext_(uid, s));
+}
+
+// 選單不能直接開相簿（LINE 限制），改回一則附［從相簿選］［拍照］小按鈕的訊息
+function uploadPrompt_() {
+  return { type: 'text', text: '選一張或多張截圖傳給我 ✦\n購票訂單、售票公告、周邊訂單都可以，我會自己判斷。', quickReply: { items: [
+    { type: 'action', action: { type: 'cameraRoll', label: '從相簿選' } },
+    { type: 'action', action: { type: 'camera', label: '拍照' } },
+  ] } };
 }
 
 /* ---------- 待到貨 ---------- */

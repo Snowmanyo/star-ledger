@@ -357,6 +357,8 @@ const LINE_HELP = [
   '📤 上傳截圖：按選單「上傳截圖」會直接打開相簿，可以一次選好幾張；也可以照舊用輸入框旁的＋傳圖。',
   '📸 記票：傳購票截圖給我（同一筆訂單可一次傳 2～3 張）→ 回答幾個問題 → 確認卡片按「確認建檔」。隨時輸入「取消」可以放棄目前這筆。',
   '🛍 周邊：傳周邊訂單截圖給我（品項多可以分幾張一起傳）→ 選品項歸屬、付款 → 確認建檔，會寫進網站「訂單」。打「待到貨」看還沒到的周邊，點一個品項可以標記到貨。',
+  '📝 補登：打「補登」列出還沒補實刷台幣或國際運費的周邊訂單，點一筆後打「實刷 2580」「重量 1200g 費率 120」；也可以直接打「訂單編號 實刷 2580」。',
+  '💾 備份：每週日凌晨 3 點自動備份試算表到雲端硬碟（留最近 8 份）；打「備份」可以馬上備份一次。',
   '🎫 搶票：傳主辦單位的售票公告截圖給我，確認後會在開賣前一天晚上和開賣前 30 分鐘提醒要搶的人。',
   '🔎 查詢：用下方選單，或直接問我，例如「11月有什麼場」「DAY6 今年看了幾場」「今年花多少」。',
   '🎫 未來場次：每場會列出座位、誰要去、取票了沒；取完票點下方「已取」標記。只想看還沒取的票可以打「待取票」。',
@@ -912,12 +914,13 @@ function onLineText_(token, uid, me, users, text) {
   const trade = tradeSession_(uid);
   if (trade) return onTradeText_(token, uid, trade, text);
   const ed = editSession_(uid);
-  if (ed) return ed.kind === 'transfer' ? editTransferText_(token, uid, ed, text) : editOnsaleGroupText_(token, uid, ed, text);
+  if (ed) return ed.kind === 'transfer' ? editTransferText_(token, uid, ed, text) : ed.kind === 'order' ? fillOrderText_(token, uid, ed, text) : editOnsaleGroupText_(token, uid, ed, text);
   if (!s) {
     if (PROPS.getProperty('ld_' + uid)) {
       PROPS.deleteProperty('ld_' + uid);
       return lineReply_(token, '上一筆放太久，已經自動清除了，請重新傳截圖 🙏');
     }
+    if (quickFill_(token, uid, text)) return;
     lineLoading_(uid);
     return lineReply_(token, answerQuestion_(text, me));
   }
@@ -973,6 +976,8 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'odelok') return pb.v === 'no' ? lineReply_(token, '好，沒有刪除。') : deleteOnsaleGroup_(token, uid, pb.v);
   if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
   if (pb.a === 'marr') return arrivalsPick_(token, pb.v);
+  if (pb.a === 'ofill') return openOrderFill_(token, uid, pb.v);
+  if (pb.a === 'ocost') return recalcOrderCost_(token, pb.v);
   if (pb.a === 'marrok') return arrivalsMark_(token, pb.v);
   if (pb.a === 'trade') return tradePick_(token, uid, pb.v === 'swap' ? 'swap' : 'sell');
   if (pb.a === 'tnote' || pb.a === 'tdeliv' || pb.a === 'tplace' || pb.a === 'tsel' || pb.a === 'tpick') {
@@ -1673,6 +1678,8 @@ function lineCommand_(text, me) {
   if (t === '轉賣中') return resaleText_();
   if (t === '即將開賣') return onsaleListMessage_(me.uid, {});
   if (/^(待到貨|未到貨|還沒到貨|周邊到貨)$/.test(t)) return arrivalsMessage_();
+  if (t === '補登') return fillListMessage_();
+  if (t === '備份') return backupText_();
   if (t === '換售資訊') return tradeStart_();
   if (t === '上傳截圖') return uploadPrompt_();
   if (/^(售票|換票)備註$/.test(t)) return tradeNotesText_(t.indexOf('售') === 0 ? 'sell' : 'swap');
@@ -1794,6 +1801,10 @@ function reminderTick() {
   const now = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm u').split(' ');
   const today = now[0], hm = now[1], weekday = now[2];
   onsaleTick_(today + ' ' + hm);
+  if (weekday === '7' && hm >= '03:00' && PROPS.getProperty('SENT_BACKUP') !== today) {
+    PROPS.setProperty('SENT_BACKUP', today);
+    try { backupNow_(); } catch (err) { Logger.log('自動備份失敗：' + err); }
+  }
   const c = reminderSettings_();
   if (c.pickup !== 'off' && hm >= c.pickup && PROPS.getProperty('SENT_PICKUP') !== today) {
     PROPS.setProperty('SENT_PICKUP', today);
@@ -3020,4 +3031,177 @@ function arrivalsMark_(token, v) {
     lock.releaseLock();
   }
   lineReply_(token, '已標記到貨 ✦ ' + hit.map(function (it) { return merchItemText_({ name: it.name, variant: it.variant, quantity: it.quantity }); }).join('\n'));
+}
+
+/* ---------- 補登周邊訂單：實刷台幣、重量／集運費率、國際運費、實際出貨 ---------- */
+const orderMissing_ = function (o) {
+  const out = [];
+  if (o.currency && o.currency !== 'TWD' && !num_(o.chargedTwd)) out.push('實刷台幣');
+  if (String(o.notes || '').indexOf('國際運費尚未確認') >= 0) out.push('國際運費');
+  return out;
+};
+const orderItems_ = function (id) { return sheetRows_('items').filter(function (it) { return it.orderId === id; }); };
+const findOrderRow_ = function (id) { return sheetRows_('orders').filter(function (o) { return o.id === id; })[0]; };
+
+function fillListMessage_() {
+  const list = sheetRows_('orders').filter(function (o) { return orderMissing_(o).length; })
+    .sort(function (a, b) { return String(b.orderDate).localeCompare(String(a.orderDate)); });
+  if (!list.length) return '周邊訂單都補完了 ✦';
+  return agendaMessage_('📝 還沒補完的周邊訂單', list.map(function (o) {
+    const items = orderItems_(o.id);
+    return {
+      date: str_(o.orderDate).slice(0, 10), top: [o.channel, o.orderNumber].filter(Boolean).join('｜'),
+      title: items.length ? items[0].name + (items.length > 1 ? ' 等 ' + items.length + ' 項' : '') : '（沒有品項）',
+      lines: [{ t: '缺：' + orderMissing_(o).join('、'), c: C_ACCENT }],
+      action: { type: 'postback', label: '補登', data: 'a=ofill&v=' + o.id, displayText: '補登 ' + (o.orderNumber || o.channel || '') },
+    };
+  }), { sub: '日期是下單日', foot: '點一筆開始補；也可以直接打「訂單編號 實刷 2580」。' });
+}
+
+// 從一句話讀出要補的欄位：實刷 2580、重量 1200g（或 1.2kg）、費率 120、國際運費 150、出貨了／出貨 10/20
+function parseFill_(text) {
+  const t = String(text).replace(/,/g, '');
+  const f = {};
+  let m = t.match(/(?:實刷|刷卡|刷了)\s*(?:台幣|TWD|NT\$?)?\s*(\d+(?:\.\d+)?)/i);
+  if (m) f.chargedTwd = Number(m[1]);
+  m = t.match(/(?:重量|秤重|重)\s*(\d+(?:\.\d+)?)\s*(kg|公斤|g|公克|克)?/i);
+  if (m) f.weightGrams = Math.round(Number(m[1]) * (/kg|公斤/i.test(m[2] || '') ? 1000 : 1));
+  m = t.match(/(?:費率|每公斤|集運費率)\s*(\d+(?:\.\d+)?)/) || t.match(/(\d+(?:\.\d+)?)\s*\/\s*(?:kg|公斤)/i);
+  if (m) f.internationalShippingRateTwdPerKg = Number(m[1]);
+  m = t.match(/國際運費\s*(\d+(?:\.\d+)?)/) || t.match(/(?:^|[^率])運費\s*(\d+(?:\.\d+)?)/);
+  if (m) f.internationalShippingTwd = Number(m[1]);
+  if (/出貨了|已出貨/.test(t)) f.actualShipDate = today_();
+  m = t.match(/出貨\s*(\d{4}[-/])?(\d{1,2})[/-](\d{1,2})/);
+  if (m) {
+    const now = today_();
+    let y = m[1] ? Number(m[1].slice(0, 4)) : Number(now.slice(0, 4));
+    const d = y + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+    f.actualShipDate = !m[1] && d > now ? (y - 1) + d.slice(4) : d; // 出貨日不會在未來
+  }
+  return f;
+}
+
+function applyFill_(o, f) {
+  Object.keys(f).forEach(function (k) { o[k] = f[k]; });
+  if (f.weightGrams !== undefined || f.internationalShippingRateTwdPerKg !== undefined) {
+    if (f.internationalShippingTwd === undefined && num_(o.weightGrams) && num_(o.internationalShippingRateTwdPerKg)) {
+      o.internationalShippingTwd = Math.round(num_(o.weightGrams) / 1000 * num_(o.internationalShippingRateTwdPerKg));
+    }
+  }
+  if (f.chargedTwd !== undefined && o.currency !== 'TWD') {
+    const items = orderItems_(o.id);
+    const total = items.reduce(function (t, it) { return t + num_(it.unitPrice) * num_(it.quantity); }, 0) + num_(o.domesticShipping) - num_(o.discountAmount);
+    if (total && num_(o.chargedTwd)) o.exchangeRate = Number((o.currency === 'USD' ? num_(o.chargedTwd) / total : total / num_(o.chargedTwd)).toFixed(4));
+  }
+  if (num_(o.internationalShippingTwd)) {
+    o.notes = String(o.notes || '').split('\n').filter(function (l) { return l.trim() !== '國際運費尚未確認'; }).join('\n');
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { writeRows_('orders', [o]); } finally { lock.releaseLock(); }
+}
+
+function orderFillCard_(o) {
+  const row = function (k, v) {
+    return { type: 'box', layout: 'baseline', spacing: 'md', contents: [
+      ftext_(k, 'sm', C_MUTED, { flex: 3, wrap: false }), ftext_(str_(v) || '—', 'sm', C_INK, { flex: 6 }),
+    ] };
+  };
+  const rate = num_(o.exchangeRate) ? (o.currency === 'USD' ? 'USD 1 = TWD ' + num_(o.exchangeRate) : 'TWD 1 = ' + o.currency + ' ' + num_(o.exchangeRate)) : '';
+  const missing = orderMissing_(o);
+  const hasStock = sheetRows_('sales').some(function (sl) { return sl.sourceOrderId === o.id; });
+  const button = function (label, data, style) {
+    return { type: 'button', style: style, height: 'sm', color: style === 'primary' ? C_ACCENT : undefined, action: { type: 'postback', label: label, data: data, displayText: label } };
+  };
+  return {
+    type: 'flex', altText: '補登：' + (o.orderNumber || o.channel || '周邊訂單'),
+    contents: { type: 'bubble',
+      body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+        ftext_('補登周邊訂單', 'xs', C_ACCENT, { weight: 'bold' }),
+        ftext_(o.channel || '（沒有通路）', 'lg', C_INK, { weight: 'bold' }),
+        ftext_([str_(o.orderDate).slice(0, 10), o.orderNumber].filter(Boolean).join('｜') || '—', 'sm', C_MUTED),
+        { type: 'separator', margin: 'md' },
+        row('實刷台幣', num_(o.chargedTwd) ? 'TWD ' + num_(o.chargedTwd).toLocaleString('en-US') : ''),
+        row('匯率', rate),
+        row('重量', num_(o.weightGrams) ? num_(o.weightGrams) + ' g' : ''),
+        row('集運費率', num_(o.internationalShippingRateTwdPerKg) ? num_(o.internationalShippingRateTwdPerKg) + ' / kg' : ''),
+        row('國際運費', num_(o.internationalShippingTwd) ? 'TWD ' + num_(o.internationalShippingTwd).toLocaleString('en-US') : ''),
+        row('實際出貨', o.actualShipDate),
+        ftext_(missing.length ? '還缺：' + missing.join('、') : '都補完了 ✦', 'sm', missing.length ? C_ACCENT : C_OK, { weight: 'bold', margin: 'md' }),
+        ftext_('直接打字補，例如「實刷 2580」「重量 1200g 費率 120」「國際運費 150」「出貨 10/20」', 'xxs', C_MUTED, { margin: 'md' }),
+      ] },
+      footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+        hasStock ? button('重算現貨成本', 'a=ocost&v=' + o.id, 'primary') : null,
+        button('完成', 'a=xend&v=1', hasStock ? 'secondary' : 'primary'),
+      ].filter(Boolean) },
+    },
+  };
+}
+
+function openOrderFill_(token, uid, id) {
+  const o = findOrderRow_(id);
+  if (!o) return lineReply_(token, '找不到這筆訂單，可能已經被刪除了。');
+  saveEditSession_(uid, { kind: 'order', id: id });
+  lineReply_(token, orderFillCard_(o));
+}
+const FILL_HINT_ = '看不懂要補什麼，可以這樣打：「實刷 2580」「重量 1200g 費率 120」「國際運費 150」「出貨 10/20」。';
+function fillOrderText_(token, uid, sess, text) {
+  const o = findOrderRow_(sess.id);
+  if (!o) { clearEditSession_(uid); return lineReply_(token, '找不到這筆訂單，可能已經被刪除了。'); }
+  const f = parseFill_(text);
+  if (!Object.keys(f).length) return lineReply_(token, FILL_HINT_);
+  applyFill_(o, f);
+  lineReply_(token, ['已補登 ✦' + (sheetRows_('sales').some(function (sl) { return sl.sourceOrderId === o.id; }) && (f.chargedTwd !== undefined || num_(o.internationalShippingTwd))
+    ? '\n這筆有現貨，成本要更新的話按「重算現貨成本」。' : ''), orderFillCard_(o)]);
+}
+// 沒有進行中的事時，「W-100 實刷 2580」直接補登
+function quickFill_(token, uid, text) {
+  const m = String(text).match(/^(\S+)\s+(.+)$/);
+  if (!m || !/實刷|刷卡|重量|秤重|費率|運費|出貨/.test(m[2])) return false;
+  const o = sheetRows_('orders').filter(function (x) { return str_(x.orderNumber) && str_(x.orderNumber).toLowerCase() === m[1].toLowerCase(); })[0];
+  if (!o) return false;
+  saveEditSession_(uid, { kind: 'order', id: o.id });
+  fillOrderText_(token, uid, { id: o.id }, m[2]);
+  return true;
+}
+function recalcOrderCost_(token, id) {
+  const o = findOrderRow_(id);
+  if (!o) return lineReply_(token, '找不到這筆訂單，可能已經被刪除了。');
+  const items = orderItems_(id);
+  const rows = sheetRows_('sales').filter(function (sl) { return sl.sourceOrderId === id; }).map(function (sl) {
+    const it = items.filter(function (x) { return x.id === sl.sourceItemId; })[0];
+    return it ? Object.assign({}, sl, { unitCostTwd: merchUnitCost_(o, items, it) }) : null;
+  }).filter(Boolean);
+  if (!rows.length) return lineReply_(token, '這筆沒有現貨品項。');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { writeRows_('sales', rows); } finally { lock.releaseLock(); }
+  lineReply_(token, '已重算現貨成本 ✦\n' + rows.map(function (r) {
+    return [r.name, r.variant].filter(Boolean).join('｜') + '：每件 TWD ' + num_(r.unitCostTwd).toLocaleString('en-US');
+  }).join('\n'));
+}
+
+/* ---------- 自動備份：每週日 03:00 複製整份試算表，只留最近 8 份（舊的進垃圾桶） ---------- */
+const BACKUP_FOLDER_ = '追星總帳備份';
+const BACKUP_KEEP_ = 8;
+function backupNow_() {
+  const it = DriveApp.getFoldersByName(BACKUP_FOLDER_);
+  const folder = it.hasNext() ? it.next() : DriveApp.createFolder(BACKUP_FOLDER_);
+  const at = nowTaipei_();
+  DriveApp.getFileById(ss_().getId()).makeCopy('追星總帳 備份 ' + at.slice(0, 10), folder);
+  const files = [];
+  const fi = folder.getFiles();
+  while (fi.hasNext()) files.push(fi.next());
+  files.sort(function (a, b) { return b.getDateCreated().getTime() - a.getDateCreated().getTime(); });
+  files.slice(BACKUP_KEEP_).forEach(function (f) { f.setTrashed(true); });
+  PROPS.setProperty('LAST_BACKUP', at);
+  return at;
+}
+function backupText_() {
+  try {
+    const at = backupNow_();
+    return '已備份 ✦ ' + at + '\n放在雲端硬碟「' + BACKUP_FOLDER_ + '」資料夾，只保留最近 ' + BACKUP_KEEP_ + ' 份。\n之後每週日凌晨 3 點會自動備份。';
+  } catch (err) {
+    return '備份失敗：' + String(err.message || err) + '\n上一次成功備份：' + (PROPS.getProperty('LAST_BACKUP') || '還沒有');
+  }
 }

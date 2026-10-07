@@ -1860,6 +1860,8 @@ function openOrderForm(existing, draft) {
     if (!num(o.internationalShippingTwd) && num(o.weightGrams) && num(o.internationalShippingRateTwdPerKg)) {
       o.internationalShippingTwd = Math.round(num(o.weightGrams) / 1000 * num(o.internationalShippingRateTwdPerKg));
     }
+    // 不是代購的品項不保留代購對象與付清狀態（切換歸屬時隱藏欄位的值會殘留）
+    o.items.forEach(it => { if (it.ownership !== 'proxy') { it.proxyFor = ''; it.proxyPaid = false; } });
     const deleted = originalItemIds.filter(id => !o.items.some(it => it.id === id));
     saveOrder(o, deleted);
     closeSheet();

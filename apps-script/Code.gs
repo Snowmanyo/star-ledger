@@ -3219,3 +3219,9 @@ function backupText_() {
     return '備份失敗：' + friendlyError_(err) + '\n上一次成功備份：' + (PROPS.getProperty('LAST_BACKUP') || '還沒有');
   }
 }
+
+// 在編輯器選 authorizeDrive →「執行」：沒允許過雲端硬碟權限時會強制跳出授權畫面，允許後順便備份一次
+function authorizeDrive() {
+  ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, ['https://www.googleapis.com/auth/drive']);
+  Logger.log(backupText_());
+}

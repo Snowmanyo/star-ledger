@@ -3451,7 +3451,8 @@ function resaleUpdate_(uid, imageParts, text) {
     '請判斷這是在說哪一張（或哪幾張）票，ids 填對應的 id；用演出日期、表演者、活動名稱、座位、價格比對，看不出來就把可能的都列出，完全對不上就留空。',
     '只輸出有提到的進度：person 買家名字或暱稱，buyerContact 聯絡方式（LINE ID、IG 帳號、PTT 帳號等），amountTwd 談好的成交價，',
     'receivedTwd 是「累計」已收的錢（原本 received 加上這次收的；說好但還沒付款就不要填），delivered 是否已經把票給買家。',
-    'summary 用一句中文說明這次的進度（例如「小美要買，談好 4580，已收訂金 1000」）。不是在講轉賣進度就輸出 understood: false。',
+    'summary 用一句中文說明這次的進度（例如「小美要買，談好 4580，已收訂金 1000」）。',
+    '只要使用者是在講賣票、買家、價格、收錢或給票，就輸出 understood: true，就算對不上是哪張票也一樣（ids 留空，讓使用者自己選）；完全無關才輸出 understood: false。',
   ].filter(Boolean).join('\n');
   const r = gemini_([{ text: prompt }].concat(imageParts), RESALE_UPDATE_SCHEMA);
   if (r.error) return r.error;

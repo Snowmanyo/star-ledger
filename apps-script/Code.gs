@@ -253,6 +253,29 @@ function findOrder_(orderNumber) {
   return tr ? { title: tr.title + '（轉賣）', date: tr.date } : null;
 }
 
+// 模型順序：讀圖先用比較準的，純文字先用比較快的；正在塞車（剛剛很慢、或上一次還沒回來）的排到最後
+function geminiOrder_(hasImage) {
+  const base = hasImage ? GEMINI_MODELS.slice() : GEMINI_MODELS.slice().reverse();
+  const busy = function (m) {
+    const fly = Number(cache_().get('gfly_' + m) || 0);
+    return !!cache_().get('gslow_' + m) || (fly && Date.now() - fly > 20000);
+  };
+  return base.filter(function (m) { return !busy(m); }).concat(base.filter(busy));
+}
+// 自己記錄最近的處理過程（Google 的詳細記錄沒開放）；在編輯器執行 showDebugLog 可以看
+function dlog_(msg) {
+  const line = Utilities.formatDate(new Date(), 'Asia/Taipei', 'MM-dd HH:mm:ss') + ' ' + msg;
+  console.log(line);
+  try {
+    const list = JSON.parse(cache_().get('dbg') || '[]');
+    list.push(line);
+    cache_().put('dbg', JSON.stringify(list.slice(-60)), 21600);
+  } catch (err) { /* 記錄失敗不影響正常功能 */ }
+}
+function showDebugLog() {
+  Logger.log((JSON.parse(cache_().get('dbg') || '[]')).join('\n') || '（沒有記錄）');
+}
+
 function gemini_(parts, schema) {
   const apiKey = PROPS.getProperty('GEMINI_API_KEY');
   if (!apiKey) return { error: '還沒設定 Gemini 金鑰：請到 Apps Script「專案設定 → 指令碼屬性」新增 GEMINI_API_KEY' };
@@ -266,25 +289,31 @@ function gemini_(parts, schema) {
     });
   };
   const t0 = Date.now();
+  const models = geminiOrder_(parts.some(function (p) { return p.inline_data; }));
   let lastCode = 0;
   let lastMsg = '';
-  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+  for (let i = 0; i < models.length; i++) {
     if (i > 0 && Date.now() - t0 > 45000) { lastCode = -2; break; } // 已經等太久，不再換模型（LINE 回覆有時限）
     let res;
     const t1 = Date.now();
+    cache_().put('gfly_' + models[i], String(t1), 600);
     try {
-      res = call(GEMINI_MODELS[i], config);
+      res = call(models[i], config);
       if (res.getResponseCode() === 400) { // 模型不支援 thinkingConfig 時，拿掉再試一次
         const plain = Object.assign({}, config);
         delete plain.thinkingConfig;
-        res = call(GEMINI_MODELS[i], plain);
+        res = call(models[i], plain);
       }
     } catch (err) {
       lastCode = -1;
       lastMsg = String(err.message || err);
-      console.log('gemini ' + GEMINI_MODELS[i] + ' 連線失敗 ' + (Date.now() - t1) + 'ms ' + lastMsg);
+      cache_().put('gslow_' + models[i], '1', 1800);
+      dlog_('gemini ' + models[i] + ' 連線失敗 ' + (Date.now() - t1) + 'ms ' + lastMsg.slice(0, 80));
       continue; // 逾時或連線失敗，換下一個模型
+    } finally {
+      cache_().remove('gfly_' + models[i]);
     }
+    if (Date.now() - t1 > 25000) cache_().put('gslow_' + models[i], '1', 1800); // 這個模型正在塞車，接下來 30 分鐘先用別的
     lastCode = res.getResponseCode();
     if (lastCode !== 200) lastMsg = res.getContentText().slice(0, 300);
     if (lastCode === 200) {
@@ -292,16 +321,15 @@ function gemini_(parts, schema) {
       const cand = (out.candidates || [])[0] || {};
       const text = cand.content && cand.content.parts ? cand.content.parts.filter(function (p) { return p.text && !p.thought; })
         .map(function (p) { return p.text; }).join('') : '';
-      console.log('gemini ' + GEMINI_MODELS[i] + ' ' + (Date.now() - t1) + 'ms 結束原因 ' + cand.finishReason + ' 長度 ' + text.length
-        + ' tokens ' + JSON.stringify(out.usageMetadata || {}));
+      dlog_('gemini ' + models[i] + ' ' + (Date.now() - t1) + 'ms ' + cand.finishReason + ' 長度 ' + text.length);
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch (err) { data = null; }
-      if (data) return { ok: true, model: GEMINI_MODELS[i], data: data };
+      if (data) return { ok: true, model: models[i], data: data };
       lastCode = -3; // 輸出被截斷或格式壞掉（常見於 AI 重複輸出停不下來）→ 換下一個模型
       lastMsg = String(cand.finishReason || '沒有內容');
       continue;
     }
-    console.log('gemini ' + GEMINI_MODELS[i] + ' 代碼 ' + lastCode + ' ' + (Date.now() - t1) + 'ms');
+    dlog_('gemini ' + models[i] + ' 代碼 ' + lastCode + ' ' + (Date.now() - t1) + 'ms');
     if (lastCode === 401 || lastCode === 403) break; // 金鑰有問題，換模型也沒用
   }
   if (lastCode === 429) return { error: '今天的 AI 免費次數用完了，可以明天再試，或先手動填寫' };
@@ -437,14 +465,13 @@ function lineReply_(token, messages) {
   messages = (Array.isArray(messages) ? messages : [messages]).filter(Boolean).slice(0, 5)
     .map(function (m) { return typeof m === 'string' ? { type: 'text', text: m } : m; });
   const res = lineApi_('https://api.line.me/v2/bot/message/reply', { replyToken: token, messages: messages });
+  const code = res && res.getResponseCode ? res.getResponseCode() : 0;
+  dlog_('回覆 ' + code + (code === 200 ? '' : ' ' + String(res.getContentText ? res.getContentText() : '').slice(0, 120)));
   // 讀圖太久時回覆權杖可能過期 → 改用推播送出，免得使用者以為卡住
-  if (res && res.getResponseCode && res.getResponseCode() !== 200 && CURRENT_UID_) {
-    console.log('回覆失敗 ' + res.getResponseCode() + '，改用推播');
-    linePush_([CURRENT_UID_], messages);
-  }
+  if (code !== 200 && CURRENT_UID_) dlog_('改用推播 ' + linePush_([CURRENT_UID_], messages));
 }
 function lineLoading_(uid) {
-  lineApi_('https://api.line.me/v2/bot/chat/loading/start', { chatId: uid, loadingSeconds: 30 });
+  lineApi_('https://api.line.me/v2/bot/chat/loading/start', { chatId: uid, loadingSeconds: 60 });
 }
 function lineImage_(id) {
   const res = UrlFetchApp.fetch('https://api-data.line.me/v2/bot/message/' + id + '/content', {
@@ -483,6 +510,7 @@ function handleLineEvent_(ev) {
   const uid = ev.source && ev.source.userId;
   if (!uid || ev.source.type !== 'user') return;
   CURRENT_UID_ = uid;
+  dlog_('收到 ' + ev.type + (ev.message ? ' ' + ev.message.type + ' ' + String(ev.message.text || '').slice(0, 15) : '') + (ev.postback ? ' ' + String(ev.postback.data).slice(0, 30) : ''));
   const users = lineUsers_();
   const me = users[uid];
   if (me) me.uid = uid;
@@ -2242,7 +2270,8 @@ function linePush_(to, messages) {
     Logger.log('查詢額度失敗：' + err);
   }
   for (let i = 0; i < to.length; i += 500) {
-    lineApi_('https://api.line.me/v2/bot/message/multicast', { to: to.slice(i, i + 500), messages: messages.slice(0, 5) });
+    const res = lineApi_('https://api.line.me/v2/bot/message/multicast', { to: to.slice(i, i + 500), messages: messages.slice(0, 5) });
+    if (res && res.getResponseCode && res.getResponseCode() !== 200) dlog_('推播失敗 ' + res.getResponseCode() + ' ' + String(res.getContentText()).slice(0, 120));
   }
   return true;
 }

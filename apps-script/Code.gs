@@ -405,6 +405,8 @@ const num_ = function (v) {
   return isFinite(n) ? n : 0;
 };
 const str_ = function (v) { return String(v == null ? '' : v).trim(); };
+// 試算表會把 true 顯示成 TRUE（勾選框或自動轉成布林），大小寫都要認
+const isTrue_ = function (v) { return v === true || String(v).toUpperCase() === 'TRUE'; };
 const newId_ = function () { return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); };
 const cache_ = function () { return CacheService.getScriptCache(); };
 const normName_ = function (v) { return String(v || '').toLowerCase().replace(/[\s\-–—_:：·・,，.。!！?？'"「」『』()（）[\]【】<>＜＞]/g, ''); };
@@ -1349,7 +1351,7 @@ const md_ = function (date) {
 const eventTitle_ = function (e) {
   return (e.eventType === '拼盤' || !e.artist || String(e.name).indexOf(e.artist) >= 0) ? e.name : e.artist + ' - ' + e.name;
 };
-const isPicked_ = function (l) { return String(l.ticketPickedUp) === 'true'; };
+const isPicked_ = function (l) { return isTrue_(l.ticketPickedUp); };
 function matchEvent_(e, q) {
   const hay = normName_([e.name, e.artist, e.venue, e.liveTour, e.city].join(' '));
   const keys = [q.artist, q.keyword].map(normName_).filter(Boolean);
@@ -1534,7 +1536,7 @@ function transferItem_(t, ev) {
     pickupDate: t.pickupDate || noteField_(t.notes, /領票日 (\d{4}-\d{2}-\d{2})/),
     pickupMethod: t.pickupMethod || noteField_(t.notes, /取票：([^｜]+)/),
     platform: t.platform || noteField_(t.notes, /平台：([^｜]+)/), account: t.account || noteField_(t.notes, /帳號：([^｜]+)/),
-    picked: String(t.pickedUp) === 'true', sold: String(t.settled) === 'true' || num_(t.amountTwd) > 0,
+    picked: isTrue_(t.pickedUp), sold: isTrue_(t.settled) || num_(t.amountTwd) > 0,
     stage: transferStage_(t), buyer: t.person, contact: t.buyerContact, price: priceOf_(t), received: transferReceived_(t),
     payer: noteField_(t.notes, /付款人：([^｜]+)/),
   };
@@ -1641,8 +1643,8 @@ const STAGE_ = {
 // 舊資料沒有「已收」「已給票」：勾過已收款的當作完成
 // 成交價沒填時，預設就是當初實付的金額（票面＋手續費＋福利）
 const priceOf_ = function (t) { return num_(t.amountTwd) || num_(t.costTwd); };
-const transferReceived_ = function (t) { return str_(t.receivedTwd) === '' ? (String(t.settled) === 'true' ? num_(t.amountTwd) : 0) : num_(t.receivedTwd); };
-const transferDelivered_ = function (t) { return String(t.delivered) === 'true' || (str_(t.receivedTwd) === '' && String(t.settled) === 'true'); };
+const transferReceived_ = function (t) { return str_(t.receivedTwd) === '' ? (isTrue_(t.settled) ? num_(t.amountTwd) : 0) : num_(t.receivedTwd); };
+const transferDelivered_ = function (t) { return isTrue_(t.delivered) || (str_(t.receivedTwd) === '' && isTrue_(t.settled)); };
 function transferStage_(t) {
   if (t.kind === '退票') return 'refund';
   if (transferDelivered_(t)) return 'done';
@@ -3033,7 +3035,7 @@ function arrivalsMessage_() {
   sheetRows_('orders').forEach(function (o) { orders[o.id] = o; });
   const groups = {};
   sheetRows_('items').forEach(function (it) {
-    if (it.arrived === 'true' || it.arrived === 'TRUE') return;
+    if (isTrue_(it.arrived)) return;
     const o = orders[it.orderId];
     if (!o) return;
     const k = str_(it.name) || '未命名品項';
@@ -3067,7 +3069,7 @@ function arrivalsPick_(token, itemId) {
   const orders = {};
   sheetRows_('orders').forEach(function (o) { orders[o.id] = o; });
   const list = sheetRows_('items').filter(function (it) {
-    return (str_(it.name) || '未命名品項') === name && it.arrived !== 'true' && it.arrived !== 'TRUE' && orders[it.orderId];
+    return (str_(it.name) || '未命名品項') === name && !isTrue_(it.arrived) && orders[it.orderId];
   });
   if (!list.length) return lineReply_(token, '「' + name + '」已經都到貨了 ✦');
   const opts = [['all:' + itemId, '全部到貨（' + list.length + ' 筆）']].concat(list.slice(0, 11).map(function (it) {
@@ -3081,7 +3083,7 @@ function arrivalsMark_(token, v) {
   const first = rows.filter(function (it) { return it.id === v.replace(/^all:/, ''); })[0];
   const name = first ? str_(first.name) || '未命名品項' : '';
   const hit = !first ? [] : v.indexOf('all:') === 0
-    ? rows.filter(function (it) { return (str_(it.name) || '未命名品項') === name && it.arrived !== 'true' && it.arrived !== 'TRUE'; })
+    ? rows.filter(function (it) { return (str_(it.name) || '未命名品項') === name && !isTrue_(it.arrived); })
     : [first];
   if (!hit.length) return lineReply_(token, '找不到這個品項，可能已經改過了。');
   const lock = LockService.getScriptLock();
@@ -3453,7 +3455,7 @@ function resaleUpdate_(uid, imageParts, text) {
 function resaleConfirmCard_(t, changes, summary) {
   const it = transferItem_(t, sheetRows_('events').filter(function (e) { return e.id === t.eventId; })[0]);
   const fmt = function (k, v) {
-    if (k === 'delivered') return v === true || String(v) === 'true' ? '已給' : '還沒';
+    if (k === 'delivered') return v === true || isTrue_(v) ? '已給' : '還沒';
     if (k === 'amountTwd' || k === 'receivedTwd') return num_(v) ? num_(v).toLocaleString('en-US') : '—';
     return str_(v) || '—';
   };
@@ -3509,4 +3511,19 @@ function resaleUpdatePostback_(token, uid, pb) {
   saveTransferRow_(t);
   saveEditSession_(uid, { kind: 'transfer', id: t.id });
   replyTransfer_(token, uid, t);
+}
+
+// 檢查工具：在編輯器選 testResaleUpdate →「執行」，用第一位 LINE 使用者跑一次轉賣進度，記錄耗時並請 LINE 檢查回覆格式（不會送出訊息）
+function testResaleUpdate() {
+  const users = lineUsers_();
+  const uid = Object.keys(users)[0];
+  const me = Object.assign({ uid: uid }, users[uid]);
+  const t0 = Date.now();
+  let msg = answerQuestion_('DAY6 12/5 那張賣給小美 4580，收訂金 1000，她 LINE abc123', me);
+  Logger.log('耗時 ' + (Date.now() - t0) + 'ms');
+  cache_().remove('lr_' + uid);
+  msg = (Array.isArray(msg) ? msg : [msg]).map(function (m) { return typeof m === 'string' ? { type: 'text', text: m } : m; });
+  Logger.log(JSON.stringify(msg).slice(0, 1500));
+  const res = lineApi_('https://api.line.me/v2/bot/message/validate/reply', { messages: msg });
+  Logger.log('LINE 格式檢查 ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 500));
 }

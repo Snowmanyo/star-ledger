@@ -2617,6 +2617,7 @@ async function startScan(files) {
     });
     scanTestQuota = false;
     if (res.data && res.data.docType === 'onsale') throw new Error('這張看起來是售票公告，不是購票訂單。搶票提醒請把截圖傳給 LINE 機器人建立。');
+    if (res.data && res.data.docType === 'chat') throw new Error('這張看起來是聊天截圖。轉賣進度請把截圖傳給 LINE 機器人更新。');
     if (res.data && res.data.docType === 'merch') {
       if (scan !== s) return;
       scan = null;

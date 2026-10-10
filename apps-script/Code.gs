@@ -151,7 +151,8 @@ const SCAN_PROMPT = [
   '- pickupDate 是可取票日期（YYYY-MM-DD）；如果只寫「演出前 N 天可取票」，pickupDate 填空字串、pickupDaysBefore 填 N。',
   '- payMethod 是付款方式，用 credit_card、bank_transfer、mobile_payment、cash 其中之一；payDetail 是卡別或支付平台名稱（例如 永豐、LINE Pay）。看不出來填空字串。',
   '- uncertain 列出你沒把握的欄位名稱。',
-  '- docType：已經買好的演出門票訂單或票券填 order；主辦單位的售票公告（還沒買，列出開賣時間）填 onsale；周邊商品（專輯、應援物、寫真、週邊等）的購物訂單填 merch。',
+  '- docType：已經買好的演出門票訂單或票券填 order；主辦單位的售票公告（還沒買，列出開賣時間）填 onsale；周邊商品（專輯、應援物、寫真、週邊等）的購物訂單填 merch；',
+  '  和別人的聊天對話截圖（例如 LINE、IG、PTT 站內信，在談買賣或轉讓票券）填 chat，chat 的其他欄位都留空或 0。',
   '- 如果是 onsale：eventName、artist、venue、city 照上面規則填；showDates 列出所有演出場次（YYYY-MM-DD HH:MM，沒有時間就 YYYY-MM-DD）；',
   '  sales 每一波開賣一筆：phase（例如會員預售、全面開賣、抽選登記）、saleAt（YYYY-MM-DD HH:MM，24 小時制）、platform（同上面的平台寫法）；',
   '  priceInfo 是票價摘要（例如 5880/4880/3880）；notice 是注意事項（例如實名制、每人限購 4 張）。訂單相關欄位留空或 0。',
@@ -393,6 +394,7 @@ const LINE_HELP = [
   '⏰ 提醒設定：打「提醒設定」看目前的時間；打「取票提醒改成 9:30」「轉賣提醒改成週五 21:00」「搶票預告改成 20:00」「搶票提醒改成前 15 分鐘」修改，或「…關掉」。',
   '🔁 轉賣中：點一筆可以填買家、成交價、已收多少、已給票；階段（待售／洽談中／收訂金／待給票／完成）會自動變化。',
   '🔔 即將開賣：點一筆可以打字修改或刪除。',
+  '💬 轉賣進度：直接打「DAY6 12/5 那張賣給小美 4580，收訂金 1000」，或傳和買家的聊天截圖，我會找出是哪張票，確認後更新。',
   '🗓 Apple 行事曆：打「行事曆」拿訂閱網址，iPhone 設定 → App → 行事曆 → 行事曆帳號 → 加入帳號 → 其他 → 加入訂閱的行事曆，貼上網址。所有場次和開賣時間會自動出現。',
   '📝 換售資訊：選售票或換票、挑要放的票，就會產生可以直接複製的文章；打「售票備註」「換票備註」看或修改固定備註。',
   '💰 花費：打「本月花費」或直接問「今年花多少」。',
@@ -579,6 +581,13 @@ function startDraft_(token, uid, s) {
   }
   if (r.data.docType === 'onsale') return startOnsale_(token, uid, s, r.data);
   if (r.data.docType === 'merch') return startMerch_(token, uid, s, r.data, r.duplicate);
+  if (r.data.docType === 'chat') { // 和買家的聊天截圖 → 更新轉賣
+    const imgs = s.imgs || [];
+    clearLineSession_(uid);
+    let images;
+    try { images = imgs.map(lineImage_); } catch (err) { return lineReply_(token, friendlyError_(err)); }
+    return lineReply_(token, resaleUpdate_(uid, images.map(function (img) { return { inline_data: { mime_type: img.mimeType, data: img.dataBase64 } }; }), '這是我和買家的聊天截圖。'));
+  }
   if (!str_(r.data.eventName) && !str_(r.data.date) && !num_(r.data.totalPaid)) {
     clearLineSession_(uid);
     return lineReply_(token, '看不出這是購票截圖耶，換一張試試看 🙏');
@@ -1016,6 +1025,7 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
   if (pb.a === 'marr') return arrivalsPick_(token, pb.v);
   if (pb.a === 'ofill') return openOrderFill_(token, uid, pb.v);
+  if (pb.a === 'rspick' || pb.a === 'rsok' || pb.a === 'rsno') return resaleUpdatePostback_(token, uid, pb);
   if (pb.a === 'lurl' || pb.a === 'lkind') return onLinkPostback_(token, uid, pb);
   if (pb.a === 'ocost') return recalcOrderCost_(token, pb.v);
   if (pb.a === 'marrok') return arrivalsMark_(token, pb.v);
@@ -1693,7 +1703,7 @@ function answerQuestion_(text, me) {
   const prompt = [
     '今天是 ' + today_() + '。使用者在追星記帳機器人問了一句話，請判斷要查什麼，只輸出 JSON：',
     '「' + text + '」',
-    'intent 只能是：upcoming（未來場次）、pickup（待取票）、arrivals（周邊還沒到貨的品項）、spend（花費）、count（看過幾場）、resale（還沒賣出的轉賣票）、onsale（即將開賣、要搶票的節目）、unknown（其他或看不懂）。',
+    'intent 只能是：resaleUpdate（使用者在交代轉賣票的進度，例如賣給誰、買家聯絡方式、成交價、收了訂金或尾款、已經給票）、upcoming（未來場次）、pickup（待取票）、arrivals（周邊還沒到貨的品項）、spend（花費）、count（看過幾場）、resale（還沒賣出的轉賣票）、onsale（即將開賣、要搶票的節目）、unknown（其他或看不懂）。',
     'artist 是提到的表演者，keyword 是提到的其他關鍵字（例如場館、活動名稱），沒有就填空字串。',
     'year、month 是提到的年份與月份（例如「11月」→ month 11，「今年」→ 今年的年份，「上個月」→ 換算成對應年月），沒提到填 0。',
   ].join('\n');
@@ -1703,6 +1713,7 @@ function answerQuestion_(text, me) {
   q.keyword = str_(q.keyword);
   q.year = num_(q.year);
   q.month = num_(q.month);
+  if (q.intent === 'resaleUpdate') return resaleUpdate_(me.uid, [], text);
   if (q.intent === 'upcoming') return upcomingText_(q, me.name, false);
   if (q.intent === 'pickup') return pickupListMessage_(me.name, false);
   if (q.intent === 'spend') return spendText_(q, me);
@@ -3380,4 +3391,122 @@ function saveLink_(token, uid, target, url, kind, moveFrom) {
   cache_().put('lul_' + uid, JSON.stringify({ url: url, kind: kind }), 1800);
   const flip = kind === 'ticket' ? 'notice' : 'ticket';
   lineReply_(token, ask_('已存成「' + title + '」的' + LINK_LABEL_[kind] + ' ✦', 'lkind', [[target + '|' + flip, '改成' + LINK_LABEL_[flip].slice(2)]]));
+}
+
+/* ---------- 轉賣進度：打字或傳聊天截圖 → 找出是哪張票 → 確認後更新 ---------- */
+const RESALE_UPDATE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    understood: { type: 'BOOLEAN' }, ids: { type: 'ARRAY', items: { type: 'STRING' } },
+    person: { type: 'STRING' }, buyerContact: { type: 'STRING' }, amountTwd: { type: 'NUMBER' }, receivedTwd: { type: 'NUMBER' },
+    delivered: { type: 'BOOLEAN' }, summary: { type: 'STRING' },
+  },
+  required: ['understood'],
+};
+function resaleUpdate_(uid, imageParts, text) {
+  const list = activeTransfers_();
+  if (!list.length) return '目前沒有轉賣中的票，要先把要賣的票記成「要轉賣」才能更新進度。';
+  const byId = {};
+  sheetRows_('events').forEach(function (e) { byId[e.id] = e; });
+  const view = list.map(function (t) {
+    const it = transferItem_(t, byId[t.eventId]);
+    return { id: t.id, date: it.date, time: it.time, artist: it.artist, name: it.name, venue: it.venue, seat: it.seat, count: it.count,
+      price: priceOf_(t), buyer: str_(t.person), contact: str_(t.buyerContact), received: transferReceived_(t) };
+  });
+  const prompt = [
+    '今天是 ' + today_() + '。以下是使用者正在轉賣的票（JSON）：', JSON.stringify(view),
+    imageParts.length ? '附上的圖片是使用者和買家的聊天截圖（使用者是賣方，通常是右邊或自己發的訊息）。' : '',
+    '使用者說：「' + text + '」',
+    '請判斷這是在說哪一張（或哪幾張）票，ids 填對應的 id；用演出日期、表演者、活動名稱、座位、價格比對，看不出來就把可能的都列出，完全對不上就留空。',
+    '只輸出有提到的進度：person 買家名字或暱稱，buyerContact 聯絡方式（LINE ID、IG 帳號、PTT 帳號等），amountTwd 談好的成交價，',
+    'receivedTwd 是「累計」已收的錢（原本 received 加上這次收的；說好但還沒付款就不要填），delivered 是否已經把票給買家。',
+    'summary 用一句中文說明這次的進度（例如「小美要買，談好 4580，已收訂金 1000」）。不是在講轉賣進度就輸出 understood: false。',
+  ].filter(Boolean).join('\n');
+  const r = gemini_([{ text: prompt }].concat(imageParts), RESALE_UPDATE_SCHEMA);
+  if (r.error) return r.error;
+  const c = r.data || {};
+  if (!c.understood) return '看不太出來是哪張票的進度，可以這樣說：「DAY6 12/5 那張賣給小美 4580，收訂金 1000」。';
+  const changes = {};
+  ['person', 'buyerContact', 'amountTwd', 'receivedTwd', 'delivered'].forEach(function (k) {
+    if (c[k] === undefined || c[k] === '' || (typeof c[k] === 'number' && !c[k])) return;
+    changes[k] = typeof c[k] === 'string' ? str_(c[k]) : c[k];
+  });
+  if (changes.delivered !== true) delete changes.delivered; // 只記「已給票」，沒提到就不動
+  if (!Object.keys(changes).length) return '有看到在談轉賣，但沒讀到買家、價格或收款，可以再說清楚一點，例如「賣給小美 4580」。';
+  const ids = (c.ids || []).filter(function (id) { return list.some(function (t) { return t.id === id; }); });
+  if (ids.length === 1) { // 和原本一樣的值不算變更
+    const t0 = findTransfer_(ids[0]);
+    const now = { person: str_(t0.person), buyerContact: str_(t0.buyerContact), amountTwd: priceOf_(t0), receivedTwd: transferReceived_(t0) };
+    Object.keys(now).forEach(function (k) { if (changes[k] !== undefined && String(changes[k]) === String(now[k]) && (k !== 'amountTwd' || num_(t0.amountTwd))) delete changes[k]; });
+    if (!Object.keys(changes).length) return '這張票的進度已經是這樣了，不用更新 ✦';
+  }
+  const pending = { ids: ids.length ? ids : list.map(function (t) { return t.id; }), changes: changes, summary: str_(c.summary) };
+  cache_().put('lr_' + uid, JSON.stringify(pending), 1800);
+  if (pending.ids.length === 1) return resaleConfirmCard_(findTransfer_(pending.ids[0]), changes, pending.summary);
+  const opts = pending.ids.slice(0, 12).map(function (id) {
+    const t = findTransfer_(id);
+    const it = transferItem_(t, byId[t.eventId]);
+    return [id, (shortMD_(it.date) + ' ' + (it.artist || it.name) + ' ' + (it.seat || '')).slice(0, 20)];
+  });
+  return ask_((pending.summary ? pending.summary + '\n\n' : '') + (ids.length ? '是哪一張？' : '對不上是哪一張，請選：'), 'rspick', opts.concat([['no', '都不是']]));
+}
+function resaleConfirmCard_(t, changes, summary) {
+  const it = transferItem_(t, sheetRows_('events').filter(function (e) { return e.id === t.eventId; })[0]);
+  const fmt = function (k, v) {
+    if (k === 'delivered') return v === true || String(v) === 'true' ? '已給' : '還沒';
+    if (k === 'amountTwd' || k === 'receivedTwd') return num_(v) ? num_(v).toLocaleString('en-US') : '—';
+    return str_(v) || '—';
+  };
+  const before = { person: t.person, buyerContact: t.buyerContact, amountTwd: priceOf_(t), receivedTwd: transferReceived_(t), delivered: transferDelivered_(t) };
+  const label = { person: '買家', buyerContact: '聯絡方式', amountTwd: '成交價', receivedTwd: '已收', delivered: '給票' };
+  const rows = Object.keys(changes).map(function (k) {
+    return { type: 'box', layout: 'baseline', spacing: 'md', contents: [
+      ftext_(label[k], 'sm', C_MUTED, { flex: 2 }), ftext_(fmt(k, before[k]) + ' → ' + fmt(k, changes[k]), 'sm', C_INK, { flex: 5, weight: 'bold' })] };
+  });
+  const after = Object.assign({}, t, changes);
+  const button = function (label, data, style) {
+    return { type: 'button', style: style, height: 'sm', color: style === 'primary' ? C_ACCENT : undefined, action: { type: 'postback', label: label, data: data, displayText: label } };
+  };
+  return { type: 'flex', altText: '確認轉賣進度：' + it.name, contents: { type: 'bubble',
+    body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+      ftext_('確認轉賣進度', 'xs', C_ACCENT, { weight: 'bold' }),
+      ftext_(it.name, 'lg', C_INK, { weight: 'bold' }),
+      ftext_([dateW_(it.date) + (it.time ? ' ' + it.time : ''), [it.seat, '×' + it.count + ' 張'].filter(Boolean).join(' ')].join('\n'), 'sm', C_MUTED),
+      summary ? ftext_(summary, 'sm', C_INK, { margin: 'md' }) : null,
+      { type: 'separator', margin: 'md' },
+    ].concat(rows).concat([
+      ftext_('更新後：' + STAGE_[transferStage_(after)].label, 'sm', STAGE_[transferStage_(after)].color, { weight: 'bold', margin: 'md' }),
+    ]).filter(Boolean) },
+    footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+      button('對，更新', 'a=rsok&v=' + t.id, 'primary'), button('不是這張', 'a=rsno&v=' + t.id, 'secondary'), button('取消', 'a=rsno&v=cancel', 'link'),
+    ] } } };
+}
+function resaleUpdatePostback_(token, uid, pb) {
+  const pending = JSON.parse(cache_().get('lr_' + uid) || 'null');
+  if (!pending) return lineReply_(token, '放太久了，請再說一次或重傳截圖。');
+  if (pb.a === 'rsno' && pb.v === 'cancel' || pb.a === 'rspick' && pb.v === 'no') {
+    cache_().remove('lr_' + uid);
+    return lineReply_(token, '好，沒有更新。');
+  }
+  if (pb.a === 'rsno') { // 不是這張 → 列出其他轉賣中的票讓你選
+    const others = activeTransfers_().filter(function (t) { return t.id !== pb.v; });
+    if (!others.length) { cache_().remove('lr_' + uid); return lineReply_(token, '沒有其他轉賣中的票了，沒有更新。'); }
+    pending.ids = others.map(function (t) { return t.id; });
+    cache_().put('lr_' + uid, JSON.stringify(pending), 1800);
+    const byId = {};
+    sheetRows_('events').forEach(function (e) { byId[e.id] = e; });
+    return lineReply_(token, ask_('那是哪一張？', 'rspick', others.slice(0, 12).map(function (t) {
+      const it = transferItem_(t, byId[t.eventId]);
+      return [t.id, (shortMD_(it.date) + ' ' + (it.artist || it.name) + ' ' + (it.seat || '')).slice(0, 20)];
+    }).concat([['no', '都不是']])));
+  }
+  const t = findTransfer_(pb.v);
+  if (!t) return lineReply_(token, '找不到這張票，可能已經被刪除了。');
+  if (pb.a === 'rspick') return lineReply_(token, resaleConfirmCard_(t, pending.changes, pending.summary));
+  cache_().remove('lr_' + uid);
+  Object.keys(pending.changes).forEach(function (k) { t[k] = pending.changes[k]; });
+  if (str_(t.receivedTwd) === '') t.receivedTwd = transferReceived_(t);
+  saveTransferRow_(t);
+  saveEditSession_(uid, { kind: 'transfer', id: t.id });
+  replyTransfer_(token, uid, t);
 }

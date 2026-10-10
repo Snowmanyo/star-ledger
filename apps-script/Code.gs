@@ -3527,3 +3527,15 @@ function testResaleUpdate() {
   const res = lineApi_('https://api.line.me/v2/bot/message/validate/reply', { messages: msg });
   Logger.log('LINE 格式檢查 ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 500));
 }
+
+// 檢查工具：在編輯器選 testGeminiSpeed →「執行」，比較各模型回一句話要多久
+function testGeminiSpeed() {
+  GEMINI_MODELS.forEach(function (m) {
+    const t0 = Date.now();
+    const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent', {
+      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': PROPS.getProperty('GEMINI_API_KEY') }, muteHttpExceptions: true,
+      payload: JSON.stringify({ contents: [{ parts: [{ text: '回答 OK' }] }], generationConfig: { thinkingConfig: { thinkingLevel: 'low' } } }),
+    });
+    Logger.log(m + ' → ' + res.getResponseCode() + ' ' + (Date.now() - t0) + 'ms');
+  });
+}

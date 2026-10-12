@@ -1440,15 +1440,22 @@ function agendaMessage_(title, entries, opts) {
   const per = 6;
   const pages = [];
   let cur = [];
+  let pageTitle = title;
+  const titles = [];
   entries.forEach(function (e) {
-    if (cur.filter(function (x) { return !x.section; }).length >= per && !e.section) { pages.push(cur); cur = []; }
+    if (e.page) { // 分組：每組從新的一張卡片開始，卡片標題用組名
+      if (cur.length) { pages.push(cur); titles.push(pageTitle); cur = []; }
+      pageTitle = e.page;
+      return;
+    }
+    if (cur.filter(function (x) { return !x.section; }).length >= per && !e.section) { pages.push(cur); titles.push(pageTitle); cur = []; }
     cur.push(e);
   });
-  if (cur.length) pages.push(cur);
-  const realCount = function (list) { return list.filter(function (x) { return !x.section; }).length; };
+  if (cur.length) { pages.push(cur); titles.push(pageTitle); }
+  const realCount = function (list) { return list.filter(function (x) { return !x.section && !x.page; }).length; };
   const hidden = realCount(entries) - pages.slice(0, 12).reduce(function (t, pg) { return t + realCount(pg); }, 0);
   const bubbles = pages.slice(0, 12).map(function (pg, pi) {
-    const body = [ftext_(title, 'md', C_INK, { weight: 'bold' })];
+    const body = [ftext_(titles[pi] || title, 'md', C_INK, { weight: 'bold' })];
     if (opts.sub) body.push(ftext_(opts.sub, 'xs', C_MUTED));
     pg.forEach(function (e, i) {
       if (i > 0 && !e.section && !pg[i - 1].section) body.push({ type: 'separator', margin: 'lg', color: C_LINE });
@@ -1699,20 +1706,32 @@ function unsoldTransfers_() {
 function resaleText_(title) {
   const list = activeTransfers_();
   if (!list.length) return '目前沒有進行中的轉賣 ✦';
+  const today = today_();
   const byId = {};
   sheetRows_('events').forEach(function (e) { byId[e.id] = e; });
-  const order = { talk: 0, deposit: 1, deliver: 2, sale: 3 };
-  const items = list.map(function (t) { return transferItem_(t, byId[t.eventId]); })
-    .sort(function (a, b) { return (order[a.stage] - order[b.stage]) || String(a.date).localeCompare(String(b.date)); });
-  return agendaMessage_(title || '轉賣中', items.map(function (it) {
-    const st = STAGE_[it.stage];
-    return { date: it.date, time: it.time, top: it.artist, title: it.name,
-      lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, '×' + it.count + ' 張'].filter(Boolean).join('　')),
-        pre_('👤', [it.buyer, it.contact].filter(Boolean).join('｜')),
-        it.price ? '💰 成交 ' + it.price.toLocaleString('en-US') + (it.stage === 'deposit' ? '｜已收 ' + it.received.toLocaleString('en-US') : '') : (it.face ? '💰 票面 ' + it.face : '')],
-      status: st.label, statusColor: st.color,
-      action: { type: 'postback', label: '更新', data: 'a=tedit&v=' + it.id, displayText: '更新 ' + shortMD_(it.date) + ' ' + (it.artist || it.name) } };
-  }), { sub: '共 ' + list.length + ' 筆｜點一筆可以更新買家和進度', foot: '階段會依買家、成交價、已收、已給票自動變化；網站「總帳 → 讓票」也能改。' });
+  const items = list.map(function (t) { return transferItem_(t, byId[t.eventId]); });
+  const pickupLine = function (it) {
+    const how = it.pickupMethod ? '｜' + it.pickupMethod : '';
+    if (it.picked) return { t: '☑ 已取票' + how, c: C_MUTED };
+    if (!it.pickupDate) return '⏳ 取票時間未定' + how;
+    return it.pickupDate <= today ? { t: '✅ 現在可取' + how, c: C_OK, b: true } : { t: '⏳ ' + dateW_(it.pickupDate) + ' 起可取' + how, c: C_ACCENT };
+  };
+  const entries = [];
+  ['talk', 'deposit', 'deliver', 'sale'].forEach(function (stage) { // 每個階段一張（或數張）卡片
+    const group = items.filter(function (it) { return it.stage === stage; })
+      .sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
+    if (!group.length) return;
+    entries.push({ page: STAGE_[stage].label + '（' + group.length + '）' });
+    group.forEach(function (it) {
+      entries.push({ date: it.date, time: it.time, top: it.artist, title: it.name,
+        lines: [pre_('📍', placeText_(it)), pre_('🎫', [it.seat, '×' + it.count + ' 張'].filter(Boolean).join('　')),
+          pickupLine(it), pre_('🔑', [it.platform, it.account].filter(Boolean).join(' ')),
+          pre_('👤', [it.buyer, it.contact].filter(Boolean).join('｜')),
+          it.price ? '💰 成交 ' + it.price.toLocaleString('en-US') + (stage === 'deposit' ? '｜已收 ' + it.received.toLocaleString('en-US') : '') : (it.face ? '💰 票面 ' + it.face : '')],
+        action: { type: 'postback', label: '更新', data: 'a=tedit&v=' + it.id, displayText: '更新 ' + shortMD_(it.date) + ' ' + (it.artist || it.name) } });
+    });
+  });
+  return agendaMessage_(title || '轉賣中', entries, { sub: '共 ' + list.length + ' 筆｜點一筆可以更新買家和進度｜往左滑看其他階段', foot: '階段會依買家、成交價、已收、已給票自動變化；網站「總帳 → 讓票」也能改。' });
 }
 
 function calendarText_() {

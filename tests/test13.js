@@ -1,0 +1,21 @@
+// ===== 轉賣中：依階段分卡片、可取票時間、購票帳號 =====
+const A = 'Uaaa';
+text(A, 'pw123'); text(A, 'Chi');
+setNow('2026-10-12', '10:00');
+let m;
+const H = sheets.transfers.rows[0];
+const add = o => sheets.transfers.rows.push(H.map(h => o[h] ?? ''));
+add({ id: 't1', kind: '轉賣', date: '2026-11-28', startTime: '19:00', artist: 'Young K', eventName: 'YOUNGEST', venue: 'TICC', ticketCount: '1', ticketArea: '3樓', ticketRow: '22', ticketSeat: '44', costTwd: '6080', platform: '拓元', account: 'chi@example.com', pickupDate: '2026-11-21', pickupMethod: '超商取票', settled: 'FALSE', delivered: 'FALSE' });
+add({ id: 't2', kind: '轉賣', date: '2026-12-05', artist: 'DAY6', eventName: 'FOREVER', ticketCount: '1', costTwd: '4580', platform: 'KKTIX', account: '0912', pickupDate: '2026-10-01', person: '小美', amountTwd: '4580', receivedTwd: '1000', settled: 'FALSE', delivered: 'FALSE' });
+add({ id: 't3', kind: '轉賣', date: '2026-12-20', artist: 'ITZY', eventName: 'TUNNEL', ticketCount: '2', costTwd: '6000', person: '阿明', settled: 'FALSE', delivered: 'FALSE', pickedUp: 'TRUE' });
+add({ id: 't4', kind: '轉賣', date: '2026-11-07', artist: 'FNC', eventName: 'KINGDOM', ticketCount: '1', costTwd: '3000', settled: 'TRUE', delivered: 'TRUE' });
+m = text(A, '轉賣中'); log('轉賣中', m);
+const msg = m.flat()[0];
+assert.strictEqual(msg.contents.type, 'carousel', '分成多張卡片');
+const titles = msg.contents.contents.map(b => b.body.contents[0].text);
+assert.deepStrictEqual(titles, ['🟠 洽談中（1）', '🟡 收訂金（1）', '⚪ 待售（1）'], titles.join(','));
+const f = flat(m);
+assert(/⏳ 2026\/11\/21\(六\) 起可取｜超商取票/.test(f) && /🔑 拓元 chi@example\.com/.test(f), '待售卡有取票時間和帳號');
+assert(/✅ 現在可取/.test(f) && /🔑 KKTIX 0912/.test(f) && /☑ 已取票/.test(f));
+assert(!/KINGDOM/.test(f), '大寫 TRUE 的已完成不列出');
+console.log('\nALL PASSED');

@@ -2587,7 +2587,9 @@ function transferCard_(t) {
       row('買家', it.buyer), row('聯絡方式', it.contact),
       row('成交價', it.price ? it.price.toLocaleString('en-US') + (num_(t.amountTwd) ? '' : '（預設＝實付）') : ''), row('已收', it.received ? it.received.toLocaleString('en-US') : ''),
       row('已給票', transferDelivered_(t) ? '是' : '還沒'),
-      ftext_('直接打字更新，例如「買家小美 LINE abc123 成交4580 收訂金1000」「又收了2000」', 'xxs', C_MUTED, { margin: 'md' }),
+      row('取票', [it.picked ? '已取票' : it.pickupDate ? dateW_(it.pickupDate) + ' 起可取' : '時間未定', it.pickupMethod].filter(Boolean).join('｜')),
+      row('購票帳號', [it.platform, it.account].filter(Boolean).join(' ')),
+      ftext_('直接打字更新，例如「買家小美 LINE abc123 成交4580 收訂金1000」「又收了2000」「11/21 可取票」「已取票」', 'xxs', C_MUTED, { margin: 'md' }),
     ] }, footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [
       btn('已收全額', 'paid', 'primary'), btn('已給票', 'given'), btn('還沒賣（清空買家）', 'reset'),
       { type: 'button', style: 'link', height: 'sm', action: { type: 'postback', label: '修改完成', data: 'a=xend&v=1', displayText: '修改完成' } },
@@ -2636,6 +2638,7 @@ const TRANSFER_EDIT_SCHEMA = {
   properties: {
     understood: { type: 'BOOLEAN' }, person: { type: 'STRING' }, buyerContact: { type: 'STRING' },
     amountTwd: { type: 'NUMBER' }, receivedTwd: { type: 'NUMBER' }, delivered: { type: 'BOOLEAN' }, notes: { type: 'STRING' },
+    pickupDate: { type: 'STRING' }, pickupMethod: { type: 'STRING' }, pickedUp: { type: 'BOOLEAN' }, platform: { type: 'STRING' }, account: { type: 'STRING' },
   },
   required: ['understood'],
 };
@@ -2643,16 +2646,20 @@ function editTransferText_(token, uid, sess, text) {
   const t = findTransfer_(sess.id);
   if (!t) { clearEditSession_(uid); return lineReply_(token, '找不到這筆，可能已經被刪除了。'); }
   lineLoading_(uid);
-  const view = { person: t.person, buyerContact: t.buyerContact, amountTwd: priceOf_(t), receivedTwd: transferReceived_(t), delivered: transferDelivered_(t), notes: t.notes };
+  const it0 = transferItem_(t, sheetRows_('events').filter(function (e) { return e.id === t.eventId; })[0]);
+  const view = { person: t.person, buyerContact: t.buyerContact, amountTwd: priceOf_(t), receivedTwd: transferReceived_(t), delivered: transferDelivered_(t), notes: t.notes,
+    showDate: it0.date, pickupDate: it0.pickupDate, pickupMethod: it0.pickupMethod, pickedUp: it0.picked, platform: it0.platform, account: it0.account };
   const r = gemini_([{ text: [
     '以下是一筆轉賣票的資料（JSON）：', JSON.stringify(view), '使用者說：「' + text + '」',
     '請輸出 understood: true，並只包含要修改的欄位。person 是買家名字，buyerContact 是聯絡方式（LINE ID、站內信帳號等），amountTwd 是成交價，',
     'receivedTwd 是「累計」已收的錢：使用者說「又收了／再收」要加上原本的，說「收了／收訂金」就是新的累計總額；delivered 是已經把票給買家了沒。',
+    '今天是 ' + today_() + '。pickupDate 是可取票日期（YYYY-MM-DD，沒寫年份用今天之後最近的日期；「演出前 N 天」就用 showDate 往前推），pickupMethod 是取票方式（電子票、超商取票、現場取票、宅配），',
+    'pickedUp 是自己已經把票取出來了沒，platform 是購票平台，account 是購票帳號。',
     '看不懂就只輸出 understood: false。',
   ].join('\n') }], TRANSFER_EDIT_SCHEMA);
   if (r.error) return lineReply_(token, r.error);
   const c = r.data || {};
-  const keys = ['person', 'buyerContact', 'amountTwd', 'receivedTwd', 'delivered', 'notes'].filter(function (k) { return c[k] !== undefined; });
+  const keys = ['person', 'buyerContact', 'amountTwd', 'receivedTwd', 'delivered', 'notes', 'pickupDate', 'pickupMethod', 'pickedUp', 'platform', 'account'].filter(function (k) { return c[k] !== undefined; });
   if (!c.understood || !keys.length) return lineReply_(token, '看不太懂要改哪裡，可以這樣說：「買家小美 LINE abc123 成交4580 收訂金1000」。');
   keys.forEach(function (k) { t[k] = typeof c[k] === 'string' ? str_(c[k]) : c[k]; });
   if (str_(t.receivedTwd) === '') t.receivedTwd = transferReceived_(t);

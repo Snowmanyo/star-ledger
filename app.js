@@ -2426,6 +2426,16 @@ function openTransferForm(existing) {
     ${fieldHtml('排', `<input id="t-ticketRow" value="${esc(t.ticketRow)}">`)}
     ${fieldHtml('座號', `<input id="t-ticketSeat" value="${esc(t.ticketSeat)}">`)}
   </div>
+  <div class="form-section">取票與購票帳號</div>
+  <div class="field-row">
+    ${fieldHtml('可取票日期', `<input id="t-pickupDate" type="date" value="${esc(t.pickupDate || transferNote(t, /領票日 (\d{4}-\d{2}-\d{2})/))}">`)}
+    ${fieldHtml('取票方式', `<input id="t-pickupMethod" list="dl-tpick" value="${esc(t.pickupMethod || transferNote(t, /取票：([^｜\n]+)/))}"><datalist id="dl-tpick">${PICKUP_METHODS.map(x => `<option value="${x}">`).join('')}</datalist>`)}
+  </div>
+  <label class="check-row">已取票 <input type="checkbox" id="t-pickedUp" ${toBool(t.pickedUp) ? 'checked' : ''}></label>
+  <div class="field-row">
+    ${fieldHtml('購票平台', `<input id="t-platform" list="dl-tplat" value="${esc(t.platform || transferNote(t, /平台：([^｜\n]+)/))}"><datalist id="dl-tplat">${TICKET_PLATFORMS.map(x => `<option value="${x}">`).join('')}</datalist>`)}
+    ${fieldHtml('購票帳號', `<input id="t-account" value="${esc(t.account || transferNote(t, /帳號：([^｜\n]+)/))}">`)}
+  </div>
   <div class="form-section">買家與進度 <span id="t-stage"></span></div>
   <div class="field-row">
     ${fieldHtml('買家', `<input id="t-person" list="dl-cp2" placeholder="還沒有就留空" value="${esc(t.person)}">`)}
@@ -2473,7 +2483,8 @@ function openTransferForm(existing) {
   }
   refreshTHint();
   $('#transfer-save').onclick = () => {
-    ['date', 'kind', 'person', 'buyerContact', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
+    ['date', 'kind', 'person', 'buyerContact', 'title', 'ticketArea', 'ticketRow', 'ticketSeat', 'notes', 'pickupDate', 'pickupMethod', 'platform', 'account'].forEach(k => { t[k] = $('#t-' + k).value.trim(); });
+    t.pickedUp = $('#t-pickedUp').checked;
     t.eventId = $('#t-eventId').value;
     t.delivered = $('#t-delivered').checked;
     ['ticketCount', 'costTwd', 'amountTwd', 'feeTwd', 'receivedTwd'].forEach(k => {

@@ -18,4 +18,14 @@ const f = flat(m);
 assert(/⏳ 2026\/11\/21\(六\) 起可取｜超商取票/.test(f) && /🔑 拓元 chi@example\.com/.test(f), '待售卡有取票時間和帳號');
 assert(/✅ 現在可取/.test(f) && /🔑 KKTIX 0912/.test(f) && /☑ 已取票/.test(f));
 assert(!/KINGDOM/.test(f), '大寫 TRUE 的已完成不列出');
+// 在 LINE 修改取票日期、已取票、帳號
+m = pb(A, 'a=tedit&v=t2'); assert(/取票\n2026\/10\/01\(四\) 起可取/.test(flat(m)) && /購票帳號\nKKTIX 0912/.test(flat(m)), flat(m));
+editQueue.push({ understood: true, pickupDate: '2026-11-30', pickupMethod: '超商取票', account: 'chi@example.com' });
+m = text(A, '11/30 可取票，超商取，帳號 chi@example.com'); log('改取票', m);
+let t2 = table('transfers').find(x => x.id === 't2');
+assert.deepStrictEqual([t2.pickupDate, t2.pickupMethod, t2.account], ['2026-11-30', '超商取票', 'chi@example.com']);
+assert(/2026\/11\/30\(一\) 起可取｜超商取票/.test(flat(m)));
+assert(geminiPrompts.at(-1).includes('"showDate":"2026-12-05"'), 'AI 知道演出日期，才能算「演出前 N 天」');
+editQueue.push({ understood: true, pickedUp: true });
+m = text(A, '已取票'); assert(/取票\n已取票/.test(flat(m)) && table('transfers').find(x => x.id === 't2').pickedUp === 'true');
 console.log('\nALL PASSED');

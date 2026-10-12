@@ -1341,10 +1341,18 @@ function transferStage(t) {
 }
 const stageBadge = t => { const st = STAGES[transferStage(t)]; return `<span class="badge ${st.cls}">${st.label}</span>`; };
 
+// 舊資料的平台、帳號、取票資訊寫在備註裡
+const transferNote = (t, re) => { const m = String(t.notes || '').match(re); return m ? m[1].trim() : ''; };
+function transferPickupHtml(t) {
+  const date = t.pickupDate || transferNote(t, /領票日 (\d{4}-\d{2}-\d{2})/);
+  const how = t.pickupMethod || transferNote(t, /取票：([^｜\n]+)/);
+  const tail = how ? '｜' + esc(how) : '';
+  if (toBool(t.pickedUp)) return `<span>☑ 已取票${tail}</span>`;
+  if (!date) return `<span>⏳ 取票時間未定${tail}</span>`;
+  return date <= today() ? `<span style="color:var(--ok)">✅ 現在可取${tail}</span>` : `<span>⏳ ${esc(date)} 起可取${tail}</span>`;
+}
 function transfersHtml() {
-  const order = { talk: 0, deposit: 1, deliver: 2, sale: 3, done: 4, refund: 5 };
-  const list = (DB.transfers || []).slice().sort((a, b) =>
-    (order[transferStage(a)] - order[transferStage(b)]) || String(a.date).localeCompare(String(b.date)));
+  const list = (DB.transfers || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
   if (!list.length) return emptyHtml('還沒有讓票／換票紀錄，點右下角＋新增');
   const active = list.filter(t => !['done', 'refund'].includes(transferStage(t)));
   const owed = active.filter(t => transferStage(t) !== 'sale').reduce((s, t) => s + Math.max(0, transferPrice(t) - transferReceived(t)), 0);
@@ -1354,13 +1362,14 @@ function transfersHtml() {
     <div class="stat"><div class="n">${fmtInt(owed)}</div><div class="l">還沒收 TWD</div></div>
   </div>
   <div class="section-note">階段會依買家、成交價、已收、已給票自動變化</div>`;
-  html += list.map(t => {
+  const card = t => {
     const ev = DB.events.find(e => e.id === t.eventId);
     const seat = seatText({ ticketArea: t.ticketArea, ticketRow: t.ticketRow, ticketSeat: t.ticketSeat });
     const st = transferStage(t), got = transferReceived(t), price = transferPrice(t);
+    const account = [t.platform || transferNote(t, /平台：([^｜\n]+)/), t.account || transferNote(t, /帳號：([^｜\n]+)/)].filter(Boolean).join(' ');
     return `<div class="card tappable" data-transfer="${esc(t.id)}">
       <div class="row-head">
-        <div class="row-title">${stageBadge(t)} ${esc(t.title || (ev ? eventTitle(ev) : (t.notes || '未指定活動')))}</div>
+        <div class="row-title">${esc(t.title || (ev ? eventTitle(ev) : (t.notes || '未指定活動')))}</div>
         ${price ? `<div class="amount">${fmtInt(price)}</div>` : ''}
       </div>
       <div class="row-meta">
@@ -1369,10 +1378,18 @@ function transfersHtml() {
         ${seat ? `<span>${esc(seat)}</span>` : ''}
         ${t.kind && t.kind !== '轉賣' ? `<span>${esc(t.kind)}</span>` : ''}
       </div>
+      ${['done', 'refund'].includes(st) ? '' : `<div class="row-meta">${transferPickupHtml(t)}${account ? `<span>🔑 ${esc(account)}</span>` : ''}</div>`}
       ${t.person || t.buyerContact ? `<div class="row-meta"><span>買家 ${esc([t.person, t.buyerContact].filter(Boolean).join('｜'))}</span></div>` : ''}
       ${st === 'deposit' ? `<div class="row-meta"><span>已收 ${fmtInt(got)}／${fmtInt(price)}</span></div>` : ''}
     </div>`;
-  }).join('');
+  };
+  // 依階段分區：待售 → 洽談中 → 收訂金 → 待給票 → 完成 → 退票
+  ['sale', 'talk', 'deposit', 'deliver', 'done', 'refund'].forEach(stage => {
+    const group = list.filter(t => transferStage(t) === stage);
+    if (!group.length) return;
+    html += `<div class="form-section" style="margin-top:16px"><span class="badge ${STAGES[stage].cls}">${STAGES[stage].label}</span> ${group.length} 筆</div>`;
+    html += (stage === 'done' || stage === 'refund' ? group.slice().reverse() : group).map(card).join('');
+  });
   return html;
 }
 function renderLedger(view) {

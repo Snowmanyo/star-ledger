@@ -1717,7 +1717,7 @@ function resaleText_(title) {
     return it.pickupDate <= today ? { t: '✅ 現在可取' + how, c: C_OK, b: true } : { t: '⏳ ' + dateW_(it.pickupDate) + ' 起可取' + how, c: C_ACCENT };
   };
   const entries = [];
-  ['talk', 'deposit', 'deliver', 'sale'].forEach(function (stage) { // 每個階段一張（或數張）卡片
+  ['sale', 'talk', 'deposit', 'deliver'].forEach(function (stage) { // 每個階段一張（或數張）卡片
     const group = items.filter(function (it) { return it.stage === stage; })
       .sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
     if (!group.length) return;

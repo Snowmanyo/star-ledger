@@ -13,7 +13,7 @@ m = text(A, '轉賣中'); log('轉賣中', m);
 const msg = m.flat()[0];
 assert.strictEqual(msg.contents.type, 'carousel', '分成多張卡片');
 const titles = msg.contents.contents.map(b => b.body.contents[0].text);
-assert.deepStrictEqual(titles, ['🟠 洽談中（1）', '🟡 收訂金（1）', '⚪ 待售（1）'], titles.join(','));
+assert.deepStrictEqual(titles, ['⚪ 待售（1）', '🟠 洽談中（1）', '🟡 收訂金（1）'], titles.join(','));
 const f = flat(m);
 assert(/⏳ 2026\/11\/21\(六\) 起可取｜超商取票/.test(f) && /🔑 拓元 chi@example\.com/.test(f), '待售卡有取票時間和帳號');
 assert(/✅ 現在可取/.test(f) && /🔑 KKTIX 0912/.test(f) && /☑ 已取票/.test(f));

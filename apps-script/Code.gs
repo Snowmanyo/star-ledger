@@ -137,7 +137,8 @@ const SCAN_PROMPT = [
   '你是購票訂單截圖的資料擷取助手。圖片是同一筆演唱會／活動購票訂單的一張或多張截圖，請合併讀取，只輸出 JSON。',
   '規則：',
   '- 看不到或無法判斷的欄位填空字串或 0，不要猜。',
-  '- date 用 YYYY-MM-DD；截圖沒寫年份時，用今天（{TODAY}）之後最近的那一天推算。time 用 24 小時制 HH:MM。',
+  '- date 是演出（活動）當天的日期，不是訂購時間、付款時間或取票時間；訂單上常同時有「訂購時間」和「場次日期」，要用場次那個。',
+  '  date 用 YYYY-MM-DD；截圖沒寫年份時，用今天（{TODAY}）之後最近的那一天推算。time 是開演時間，用 24 小時制 HH:MM。',
   '- artist 是表演者；eventName 是演出名稱本身：去掉開頭的表演者名稱和結尾的城市（例如 in TAIPEI、台北站），其餘照截圖原文。',
   '  例：「ITZY 3RD WORLD TOUR <TUNNEL VISION> in TAIPEI」→ artist：ITZY，eventName：3RD WORLD TOUR <TUNNEL VISION>。',
   '- city 是城市（例：台北、首爾），venue 是場館。',
@@ -900,6 +901,8 @@ function card_(d) {
         { type: 'text', text: d.purpose === 'resale' ? '要轉賣' : '自己去', size: 'xs', color: '#A67B5B', weight: 'bold' },
         { type: 'text', text: d.eventName || '（沒有活動名稱）', weight: 'bold', size: 'lg', wrap: true, color: '#40382E' },
         { type: 'text', text: [d.date, d.time].filter(Boolean).join(' ') + (d.venue ? '｜' + [d.city, d.venue].filter(Boolean).join(' ') : '') || '—', size: 'sm', color: '#9C917F', wrap: true },
+        /^\d{4}-\d{2}-\d{2}$/.test(d.date) && d.date < today_()
+          ? { type: 'text', text: '⚠ 演出日期已經過了，如果讀錯（例如讀成訂購日），請打字「日期改成 11/28」', size: 'xs', color: '#B5543C', wrap: true } : null,
         { type: 'separator', margin: 'md' },
         row('類型', [d.eventType, d.artist].filter(Boolean).join('｜')),
         d.purpose === 'resale' ? null : row('誰要去', attendLabel_(d.attend)),

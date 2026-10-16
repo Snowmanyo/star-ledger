@@ -1934,7 +1934,7 @@ function openEventForm(existing) {
   ${sheetTitleHtml(isNew ? '新增活動' : '編輯活動 #' + esc(ev.eventNumber || '–'), !isNew, 'event-del')}
   <img id="cover-preview" class="cover-hero" src="${esc(ev.coverUrl)}" alt="" style="${ev.coverUrl ? '' : 'display:none'}">
   <datalist id="dl-artist">${datalistOptions(DB.events.map(x => x.artist))}</datalist>
-  <datalist id="dl-type">${datalistOptions(DB.events.map(x => x.eventType).concat(['專場', '演唱會', '簽售', '見面會', '快閃店']))}</datalist>
+  <datalist id="dl-type">${datalistOptions(DB.events.map(x => x.eventType).concat(['專場', '拼盤', '球賽', '演唱會', '簽售', '見面會', '快閃店']))}</datalist>
   ${fieldHtml('活動名稱', `<input id="e-name" value="${esc(ev.name)}">`)}
   ${fieldHtml('表演者', `<input id="e-artist" list="dl-artist" value="${esc(ev.artist)}">`)}
   <div class="field-row">
@@ -2530,7 +2530,7 @@ function attendSplits(names, count, amountTwd) {
   else if (names.length < count) counts[0] += count - names.length;
   return names.map((name, i) => ({ name, count: counts[i], amountTwd: Math.round(per * counts[i]), settled: false }));
 }
-const EVENT_KINDS = ['專場', '拼盤'];
+const EVENT_KINDS = ['專場', '拼盤', '球賽'];
 // 開演前 N 天 → 取票日
 function pickupFromDays(date, days) {
   if (!date || !num(days)) return '';

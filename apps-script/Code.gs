@@ -147,7 +147,9 @@ const SCAN_PROMPT = [
   '- platform 是售票平台，符合以下其一就用這個寫法：拓元、KKTIX、ibon、年代、寬宏、遠大、NOL、Melon、YES24；Interpark 也寫 NOL；都不是就寫看到的名稱。',
   '- account 是購買人的帳號、姓名、信箱或電話（截圖上看得到才填）。orderNumber 是訂單編號。',
   '- unitBenefit 是單張福利或加購費用（例如福利包、應援福利），沒有就填 0。',
-  '- eventType：只有一組表演者的個人演唱會填「專場」；多組表演者同台的音樂節、頒獎典禮、聯合演出填「拼盤」；看不出來填空字串。',
+  '- eventType：只有一組表演者的個人演唱會填「專場」；多組表演者同台的音樂節、頒獎典禮、聯合演出填「拼盤」；棒球、籃球、足球等運動比賽填「球賽」；看不出來填空字串。',
+  '- 球賽（也是 docType order）：artist 填對戰球隊，格式「A vs B」，照截圖上的順序和寫法（例：統一7-ELEVEn獅 vs 樂天桃猿）；',
+  '  eventName 填賽事名稱（例：中華職棒 例行賽、WBC 經典賽），截圖沒寫賽事名稱就跟 artist 一樣填對戰組合；座位的區域照原文（例：內野一般區410區）。',
   '- pickupMethod 是取票方式，用「電子票」「超商取票」「現場取票」「宅配」其中之一，看不出來填空字串。',
   '- pickupDate 是可取票日期（YYYY-MM-DD）；如果只寫「演出前 N 天可取票」，pickupDate 填空字串、pickupDaysBefore 填 N。',
   '- payMethod 是付款方式，用 credit_card、bank_transfer、mobile_payment、cash 其中之一；payDetail 是卡別或支付平台名稱（例如 永豐、LINE Pay）。看不出來填空字串。',
@@ -405,6 +407,7 @@ const LINE_PLATFORMS = ['拓元', 'KKTIX', 'ibon', '年代', '寬宏', '遠大',
 const LINE_PLATFORM_ALIAS = { interpark: 'NOL', 'nol ticket': 'NOL', 'nol interpark': 'NOL', tixcraft: '拓元', kham: '寬宏', 'era ticket': '年代' };
 const PAY_LABEL_ = { credit_card: '信用卡', bank_transfer: '轉帳', mobile_payment: '行動支付', cash: '現金' };
 const PICKUP_METHODS_ = ['電子票', '超商取票', '現場取票', '宅配'];
+const EVENT_TYPES_ = ['專場', '拼盤', '球賽'];
 const LINE_STEPS = ['purpose', 'attend', 'eventType', 'platform', 'account', 'payMethod', 'payDetail', 'payer', 'pickupMethod', 'pickup'];
 const OPTIONAL_STEPS = ['account', 'payDetail', 'pickup']; // 可以跳過的題目
 const AI_FIELDS = ['eventName', 'artist', 'date', 'time', 'city', 'venue', 'eventType', 'ticketType', 'area', 'row', 'seat',
@@ -653,7 +656,7 @@ function draftFrom_(x) {
     ticketCount: num_(x.ticketCount) || seats.length || 1,
     currency: ['TWD', 'KRW', 'JPY', 'USD'].indexOf(cur) >= 0 ? cur : 'TWD',
     unitFace: num_(x.unitFace), unitBenefit: num_(x.unitBenefit), unitFee: num_(x.unitFee),
-    eventType: ['專場', '拼盤'].indexOf(str_(x.eventType)) >= 0 ? str_(x.eventType) : '',
+    eventType: EVENT_TYPES_.indexOf(str_(x.eventType)) >= 0 ? str_(x.eventType) : '',
     pickupMethod: PICKUP_METHODS_.indexOf(str_(x.pickupMethod)) >= 0 ? str_(x.pickupMethod) : '',
     pickupDate: str_(x.pickupDate),
     platform: plat ? (LINE_PLATFORM_ALIAS[plat.toLowerCase()] || LINE_PLATFORMS.filter(function (p) { return p.toLowerCase() === plat.toLowerCase(); })[0] || plat) : '',
@@ -746,7 +749,7 @@ function question_(step, d) {
     names.forEach(function (x) { opts.push([x + ':' + n, n > 1 ? x + ' ' + n + ' 張' : x]); });
     return ask_('這筆（' + n + ' 張）誰要去？其他組合可以直接打字，例如「Chi 1 Jhen 1」', step, opts.slice(0, 12));
   }
-  if (step === 'eventType') return ask_('專場還是拼盤？', step, [['專場', '專場'], ['拼盤', '拼盤']]);
+  if (step === 'eventType') return ask_('專場、拼盤，還是球賽？', step, EVENT_TYPES_.map(function (x) { return [x, x]; }));
   if (step === 'platform') return ask_('在哪個平台買的？（其他平台可以直接打字）', step, pairs(LINE_PLATFORMS));
   if (step === 'account') return ask_('用哪個帳號買的？可以直接打字（名字、信箱、帳號或電話）', step, pairs(knownValues_('ticketAccount', d.platform)).concat(skip));
   if (step === 'payMethod') return ask_('付款方式？', step, Object.keys(PAY_LABEL_).map(function (k) { return [k, PAY_LABEL_[k]]; }));
@@ -848,7 +851,7 @@ function applyAnswer_(s, step, v, typed) {
     if (v !== 'self' && v !== 'resale') return false;
     d.purpose = v;
   } else if (step === 'eventType') {
-    if (typed) v = /拼/.test(v) ? '拼盤' : /專/.test(v) ? '專場' : '';
+    if (typed) v = /拼/.test(v) ? '拼盤' : /專/.test(v) ? '專場' : /球|賽|比賽/.test(v) ? '球賽' : '';
     if (!v) return false;
     d.eventType = v;
   } else if (step === 'payMethod') {
@@ -950,7 +953,7 @@ function editDraft_(d, text) {
     '使用者說：「' + text + '」',
     '請輸出 understood: true，並只包含使用者要修改的欄位，沒提到的欄位不要輸出。',
     'purpose 只能是 self（自己去）或 resale（要轉賣）；payMethod 只能是 credit_card、bank_transfer、mobile_payment、cash；',
-    'eventType 只能是 專場 或 拼盤；日期用 YYYY-MM-DD，時間用 HH:MM；座位的排、號只填數字或代號。',
+    'eventType 只能是 專場、拼盤 或 球賽；日期用 YYYY-MM-DD，時間用 HH:MM；座位的排、號只填數字或代號。',
     'attend 是誰要去，格式「名字 張數、名字 張數」（例：Chi 1、Jhen 1）。',
     '如果「演出前 N 天取票」，pickupDate 用演出日期往前推 N 天。看不懂使用者要改什麼，就只輸出 understood: false。',
   ].join('\n');

@@ -279,6 +279,8 @@ function showDebugLog() {
   Logger.log((JSON.parse(cache_().get('dbg') || '[]')).join('\n') || '（沒有記錄）');
 }
 
+const BUSY_CODES_ = [500, 502, 503, 504]; // Google 忙線或暫時故障
+
 function gemini_(parts, schema) {
   const apiKey = PROPS.getProperty('GEMINI_API_KEY');
   if (!apiKey) return { error: '還沒設定 Gemini 金鑰：請到 Apps Script「專案設定 → 指令碼屬性」新增 GEMINI_API_KEY' };
@@ -307,6 +309,11 @@ function gemini_(parts, schema) {
         delete plain.thinkingConfig;
         res = call(models[i], plain);
       }
+      if (BUSY_CODES_.indexOf(res.getResponseCode()) >= 0 && Date.now() - t0 < 25000) { // 忙線通常幾秒就好，等一下再試一次
+        dlog_('gemini ' + models[i] + ' 忙線 ' + res.getResponseCode() + '，2 秒後重試');
+        Utilities.sleep(2000);
+        res = call(models[i], config);
+      }
     } catch (err) {
       lastCode = -1;
       lastMsg = String(err.message || err);
@@ -332,13 +339,15 @@ function gemini_(parts, schema) {
       lastMsg = String(cand.finishReason || '沒有內容');
       continue;
     }
-    dlog_('gemini ' + models[i] + ' 代碼 ' + lastCode + ' ' + (Date.now() - t1) + 'ms');
+    dlog_('gemini ' + models[i] + ' 代碼 ' + lastCode + ' ' + (Date.now() - t1) + 'ms ' + lastMsg.replace(/\s+/g, ' ').slice(0, 100));
+    if (BUSY_CODES_.indexOf(lastCode) >= 0) cache_().put('gslow_' + models[i], '1', 300); // 忙線的模型 5 分鐘內排到後面
     if (lastCode === 401 || lastCode === 403) break; // 金鑰有問題，換模型也沒用
   }
-  if (lastCode === 429) return { error: '今天的 AI 免費次數用完了，可以明天再試，或先手動填寫' };
+  if (lastCode === 429) return { error: 'AI 的免費次數暫時用完了（可能是短時間內用太多次，或今天的額度用完），等幾分鐘再試；還是不行就明天再試。' };
+  if (BUSY_CODES_.indexOf(lastCode) >= 0) return { error: '現在用 AI 的人太多，Google 那邊忙線中（不是你的截圖有問題），等 1～2 分鐘再試一次就好。' };
   if (lastCode === 401 || lastCode === 403) return { error: 'Gemini 金鑰無效或沒有權限（代碼 ' + lastCode + '），請確認指令碼屬性 GEMINI_API_KEY' };
   if (lastCode === -2 || lastCode === -3) return { error: 'AI 這次讀不出來（讀太久或內容亂掉）。可以再傳一次，或把截圖裁小一點、一次只傳一筆訂單。' };
-  return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '）：' + lastMsg };
+  return { error: 'AI 暫時無法使用（代碼 ' + lastCode + '），請稍後再試。' };
 }
 
 // 檢查工具：在 Apps Script 編輯器選 testGemini →「執行」，下方「執行記錄」會顯示金鑰與模型是否可用
@@ -611,7 +620,8 @@ function startDraft_(token, uid, s) {
   const r = readLineImages_(s.imgs || []);
   if (r.error) {
     clearLineSession_(uid);
-    return lineReply_(token, r.error + '\n請再傳一次截圖，或改用網站掃票。');
+    cache_().put('lretry_' + uid, JSON.stringify(s.imgs || []), 3600); // 讓使用者按「再試一次」，不用重傳截圖
+    return lineReply_(token, ask_(r.error + '\n可以按下面的「再試一次」，不用重傳截圖。', 'retry', [['1', '再試一次']]));
   }
   if (r.data.docType === 'onsale') return startOnsale_(token, uid, s, r.data);
   if (r.data.docType === 'merch') return startMerch_(token, uid, s, r.data, r.duplicate);
@@ -1061,6 +1071,15 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
   if (pb.a === 'marr') return arrivalsPick_(token, pb.v);
   if (pb.a === 'ofill') return openOrderFill_(token, uid, pb.v);
+  if (pb.a === 'retry') {
+    const imgs = JSON.parse(cache_().get('lretry_' + uid) || '[]');
+    if (!imgs.length) return lineReply_(token, '放太久了，請重新傳一次截圖 🙏');
+    cache_().remove('lretry_' + uid);
+    lineLoading_(uid);
+    const fresh = { imgs: imgs };
+    saveLineSession_(uid, fresh);
+    return startDraft_(token, uid, fresh);
+  }
   if (pb.a === 'rspick' || pb.a === 'rsok' || pb.a === 'rsno') return resaleUpdatePostback_(token, uid, pb);
   if (pb.a === 'lurl' || pb.a === 'lkind') return onLinkPostback_(token, uid, pb);
   if (pb.a === 'ocost') return recalcOrderCost_(token, pb.v);

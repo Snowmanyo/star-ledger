@@ -572,6 +572,7 @@ function setName_(token, uid, users, name) {
 }
 
 function onLineImage_(ev, uid, me) {
+  if (readBusy_(uid)) return replyReadBusy_(ev.replyToken, uid); // 上一張還在讀，不同時跑兩次
   clearEditSession_(uid); // 傳新截圖＝開始新的事，結束修改中／產生文章中的狀態
   clearTradeSession_(uid);
   const lock = LockService.getScriptLock();
@@ -617,7 +618,9 @@ function readLineImages_(ids) {
 }
 
 function startDraft_(token, uid, s) {
+  const rid = readBegin_(uid);
   const r = readLineImages_(s.imgs || []);
+  if (!readEnd_(uid, rid)) return dlog_('讀圖已取消，丟掉結果');
   if (r.error) {
     clearLineSession_(uid);
     cache_().put('lretry_' + uid, JSON.stringify(s.imgs || []), 3600); // 讓使用者按「再試一次」，不用重傳截圖
@@ -993,6 +996,7 @@ function editDraft_(d, text) {
 function onLineText_(token, uid, me, users, text) {
   let s = lineSession_(uid);
   if (/^(取消|cancel)$/i.test(text)) {
+    if (readBusy_(uid)) return cancelRead_(token, uid);
     if (tradeSession_(uid)) { clearTradeSession_(uid); return lineReply_(token, '已取消，沒有產生文章。'); }
     if (editSession_(uid)) { clearEditSession_(uid); return lineReply_(token, '好，結束修改。'); }
     if (cache_().get('lu_' + uid)) { cache_().remove('lu_' + uid); return lineReply_(token, '好，網址沒有存。'); }
@@ -1071,7 +1075,9 @@ function onLinePostback_(token, uid, me, pb) {
   if (pb.a === 'xend') { clearEditSession_(uid); return lineReply_(token, '好 ✦'); }
   if (pb.a === 'marr') return arrivalsPick_(token, pb.v);
   if (pb.a === 'ofill') return openOrderFill_(token, uid, pb.v);
+  if (pb.a === 'rcancel') return cancelRead_(token, uid);
   if (pb.a === 'retry') {
+    if (readBusy_(uid)) return replyReadBusy_(token, uid);
     const imgs = JSON.parse(cache_().get('lretry_' + uid) || '[]');
     if (!imgs.length) return lineReply_(token, '放太久了，請重新傳一次截圖 🙏');
     cache_().remove('lretry_' + uid);
@@ -1144,7 +1150,9 @@ function onLinePostback_(token, uid, me, pb) {
 }
 
 function checkSupplement_(token, uid, s) {
+  const rid = readBegin_(uid);
   const r = readLineImages_(s.pending || []);
+  if (!readEnd_(uid, rid)) return dlog_('讀圖已取消，丟掉結果');
   if (r.error) {
     s.pending = [];
     saveLineSession_(uid, s);
@@ -3619,4 +3627,41 @@ function testGeminiSpeed() {
     });
     Logger.log(m + ' → ' + res.getResponseCode() + ' ' + (Date.now() - t0) + 'ms');
   });
+}
+
+/* ---------- 讀圖中：同一個人同時只讀一次，可以取消 ---------- */
+// lread_：{ id, at, imgs }；讀完或取消就清掉，取消過的 id 記在 lcx_。超過 150 秒視為已經結束（執行被中斷時不會卡住）
+const readState_ = function (uid) { return JSON.parse(cache_().get('lread_' + uid) || 'null'); };
+function readBusy_(uid) {
+  const r = readState_(uid);
+  return r && Date.now() - r.at < 150000 ? r : null;
+}
+function readBegin_(uid) {
+  const id = newId_();
+  const s = lineSession_(uid) || {};
+  cache_().put('lread_' + uid, JSON.stringify({ id: id, at: Date.now(), imgs: (s.imgs || []).concat(s.pending || []) }), 300);
+  return id;
+}
+// 回傳 true＝這次的結果還要用；false＝已經被取消
+function readEnd_(uid, id) {
+  if (cache_().get('lcx_' + id)) return false;
+  const r = readState_(uid);
+  if (r && r.id === id) cache_().remove('lread_' + uid);
+  return true;
+}
+function replyReadBusy_(token, uid) {
+  const r = readBusy_(uid);
+  if (cache_().get('lbusymsg_' + uid)) return; // 一次傳好幾張時只提醒一次
+  cache_().put('lbusymsg_' + uid, '1', 20);
+  const secs = r ? Math.round((Date.now() - r.at) / 1000) : 0;
+  lineReply_(token, ask_('上一張還在讀（已經 ' + secs + ' 秒），讀完會馬上回你，不用重傳。\n不想等可以按「取消這次」，再重新傳。', 'rcancel', [['1', '取消這次']]));
+}
+function cancelRead_(token, uid) {
+  const r = readState_(uid);
+  if (!r) return lineReply_(token, '目前沒有在讀的截圖。');
+  cache_().put('lcx_' + r.id, '1', 600); // 那一次讀完也不回覆
+  cache_().remove('lread_' + uid);
+  clearLineSession_(uid);
+  if (r.imgs && r.imgs.length) cache_().put('lretry_' + uid, JSON.stringify(r.imgs), 3600);
+  lineReply_(token, ask_('已取消，這次讀到的結果不會記。\n要重讀同一張可以按「再試一次」，或重新傳截圖。', 'retry', [['1', '再試一次']]));
 }
